@@ -9,14 +9,44 @@ folder_choice = input("Enter folder name to save images to (e.g., 'badge' or 'no
 save_dir = os.path.join("dataset", "raw", folder_choice)
 os.makedirs(save_dir, exist_ok=True)
 
-# Camera Calibration Constants
+# ==============================================================================
+#                         CAMERA CALIBRATION CONFIGURATION
+# ==============================================================================
+# This system uses Triangle Similarity Math to estimate distance:
+# Distance (inches) = (Real Width * Focal Length Factor) / Pixel Width on Screen
+# ==============================================================================
+
+# 1. PHYSICAL CONSTANT: Your real-world shoulder width in inches.
+# Measure straight across the front of your chest from shoulder joint to shoulder joint.
+# An average adult is roughly 16.0 to 18.0 inches.
 REAL_SHOULDER_WIDTH_INCHES = 17.0
-FOCAL_LENGTH_FACTOR = 530.0 
+# 2. OPTICAL FACTOR (Focal Length): Maps your specific camera lens distortion.
+# Since your Microsoft Surface camera has a specific wide-angle field of view, 
+# you must calibrate this number once so the software math lines up with reality.
+#
+# HOW TO CALIBRATE THIS NUMBER FOR YOUR DEVICE:
+#   Step A: Set this number temporarily to 530.0.
+#   Step B: Run the script, grab a physical tape measure, and stand EXACTLY 3.0 feet 
+#           (which is 36 inches) away from your Surface camera lens.
+#   Step C: Look at the terminal readout:
+#           - If the screen says you are "2.5 feet" away (too low), INCREASE this factor.
+#           - If the screen says you are "4.1 feet" away (too high), DECREASE this factor.
+#   Step D: Tweak it up or down until the live readout reads exactly "3.0 feet".
+#
+# Note: Turning OFF "Automatic Framing" in Windows settings keeps this factor stable!
+FOCAL_LENGTH_FACTOR = 318 
+# ==============================================================================
 
 model = YOLO("yolov8n-pose.pt")
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 img_counter = 0
 Offset = -60
+
+# --- INITIALIZE SMART COUNTER ---
+# Counts how many images already exist in the target directory 
+# so we don't reset our numbering sequence when restarting the script.
+existing_files = [f for f in os.listdir(save_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+img_counter = len(existing_files)
 
 print(f"\nReady to collect data! Images will save to: {save_dir}")
 print("Instructions:")
@@ -75,6 +105,13 @@ while True:
 
     cv2.imshow("Data Collector Sandbox", frame)
     
+    # === PRINT LIVE DISTANCE FEEDBACK TO TERMINAL ===
+    if current_distance is not None:
+        distance_feet = current_distance / 12.0
+        print(f"Status: Tracking | Live Distance: {distance_feet:.1f} ft ({int(current_distance)} in)     ", end="\r")
+    else:
+        print("Status: Searching for shoulders...                                                     ", end="\r")
+
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break

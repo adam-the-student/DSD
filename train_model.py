@@ -5,7 +5,7 @@ import os
 AUGMENTED_DATA_DIR = os.path.join("dataset", "augmented")
 BATCH_SIZE = 16
 IMG_SIZE = (224, 224)
-EPOCHS = 10
+EPOCHS = 6
 LEARNING_RATE = 0.001
 
 print("Loading pre-augmented dataset into memory...")
