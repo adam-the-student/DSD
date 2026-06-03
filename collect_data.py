@@ -35,11 +35,16 @@ while True:
     chest_crop_square = None
 
     for r in results:
-        if r.keypoints is not None:
+        # Check if the model found any keypoints AT ALL
+        if r.keypoints is not None and len(r.keypoints.xy) > 0:
+            # SAFETY SECURED: It is now safe to grab index [0]
             keypoints = r.keypoints.xy[0].cpu().numpy()
+            
             if len(keypoints) > 6:
                 ls_x, ls_y = int(keypoints[5][0]), int(keypoints[5][1])
                 rs_x, rs_y = int(keypoints[6][0]), int(keypoints[6][1])
+                
+                # ... the rest of your math logic stays identical down here ...
                 
                 if ls_x > 0 and rs_x > 0:
                     pixel_width = np.sqrt((ls_x - rs_x)**2 + (ls_y - rs_y)**2)
