@@ -6,4 +6,4 @@ dataset/augmented/
 # Ignore local training run logs and checkpoints
 runs/
 *.pt
-
+!models/*.pt
