@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DSD Security Access Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121214;
+            color: #e1e1e6;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            transition: background-color 0.4s ease;
+        }
+        h1 { margin-bottom: 5px; color: #ffffff; }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .card {
+            background-color: #1d1d22;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            border: 1px solid #29292e;
+        }
+        .full-width { grid-column: span 2; }
+        .metric-label { font-size: 0.9rem; color: #8d8d99; text-transform: uppercase; letter-spacing: 1px; }
+        .metric-value { font-size: 2.2rem; font-weight: bold; margin-top: 10px; text-align: center; }
+        
+        /* Status Banner State Engine Styles */
+        #status-card { transition: all 0.3s ease; }
+        .state-SCANNING { background-color: #1d1d22; color: #e1e1e6; }
+        .state-BADGE { background-color: #1b4d22; color: #afffaf; border-color: #2e7d32; }
+        .state-NO-BADGE { background-color: #661a1a; color: #ffb3b3; border-color: #c62828; }
+        .state-ALERT { background-color: #b36b00; color: #ffe6cc; border-color: #ef6c00; }
+
+        #log-box {
+            width: 100%;
+            height: 180px;
+            background-color: #09090a;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.85rem;
+            overflow-y: auto;
+            color: #00ff66;
+            box-sizing: border-box;
+            border: 1px solid #29292e;
+        }
+        .network-tag { font-size: 0.8rem; color: #6272a4; margin-top: 5px; }
+    </style>
+</head>
+<body class="state-SCANNING">
+
+    <h1>Doorway Security Monitor</h1>
+    <div class="network-tag" id="net-status">Connecting to Wall Pi WebSocket...</div>
+
+    <div class="container">
+        <div class="card full-width" id="status-card">
+            <div class="metric-label">Access Authorization Status</div>
+            <div class="metric-value" id="badge-status">INITIALIZING SYSTEM</div>
+        </div>
+
+        <div class="card">
+            <div class="metric-label">Target Distance</div>
+            <div class="metric-value" id="distance-value">0.0 ft</div>
+        </div>
+
+        <div class="card">
+            <div class="metric-label">Zone State</div>
+            <div class="metric-value" id="zone-status">SEARCHING...</div>
+        </div>
+
+        <div class="card full-width">
+            <div style="align-self: flex-start;" class="metric-label">Live Access Event History Log</div>
+            <div id="log-box"></div>
+        </div>
+    </div>
+
+    <script>
+        // Connect directly to the Pi backend using relative WebSockets
+        const logBox = document.getElementById('log-box');
+        const netStatus = document.getElementById('net-status');
+        const statusCard = document.getElementById('status-card');
+        
+        const ws = new WebSocket(`ws://${window.location.host}/ws`);
+        let lastLoggedStatus = "";
+
+        ws.onopen = () => {
+            netStatus.textContent = `Connected Live to Wall Pi Frame Server @ ${window.location.host}`;
+            netStatus.style.color = "#50fa7b";
+            addLog("System Link Established. Fetching data pipeline telemetry...");
+        };
+
+        ws.onclose = () => {
+            netStatus.textContent = "Disconnected from Wall Pi Server. Retrying link...";
+            netStatus.style.color = "#ff5555";
+            addLog("SYSTEM WARNING: Network WebSocket Connection Interrupted.");
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            // Update Text Metrics
+            document.getElementById('badge-status').textContent = data.badge_status.toUpperCase();
+            document.getElementById('distance-value').textContent = `${data.estimated_ft.toFixed(1)} ft`;
+            document.getElementById('zone-status').textContent = data.distance_status;
+
+            // Dynamically Swap UI Colors Based on System State Match Flags
+            statusCard.className = "card full-width"; // reset
+            if (data.distance_status !== "OK") {
+                statusCard.classList.add("state-ALERT");
+            } else if (data.badge_status.includes("BADGE DETECTED")) {
+                statusCard.classList.add("state-BADGE");
+            } else if (data.badge_status.includes("NO BADGE DETECTED")) {
+                statusCard.classList.add("state-NO-BADGE");
+            } else {
+                statusCard.classList.add("state-SCANNING");
+            }
+
+            // Clean Logging Logic - Only appends to text box if state transitions change
+            if (data.badge_status !== lastLoggedStatus && !data.badge_status.includes("SCANNING")) {
+                addLog(`[EVENT] Status shifted to: ${data.badge_status} | Distance: ${data.estimated_ft}ft`);
+                lastLoggedStatus = data.badge_status;
+            }
+        };
+
+        function addLog(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logBox.innerHTML += `[${timestamp}] ${message}<br>`;
+            logBox.scrollTop = logBox.scrollHeight; // Auto-scrolls log to bottom
+        }
+    </script>
+</body>
+</html>
