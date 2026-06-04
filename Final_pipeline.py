@@ -11,6 +11,28 @@ import csv
 import os
 from datetime import datetime
 import time
+import random
+
+# --- RANDOM SAMPLING CONFIGURATION ---
+# 0.005 means a 0.5% chance per valid frame. At 30 FPS, this captures roughly 
+# one frame every 6-7 seconds of continuous tracking.
+RANDOM_HARVEST_PROBABILITY = 0.005
+
+def harvest_random_frame(crop_frame):
+    """Saves a random valid chest crop to disk to build a baseline training distribution."""
+    current_time = int(time.time())
+    file_name = f"rand_{current_time}.jpg"
+    file_path = os.path.join(EDGE_CASE_DIR, file_name)
+    
+    cv2.imwrite(file_path, crop_frame)
+    
+    # Log the event to your universal system telemetry CSV file
+    log_system_telemetry(
+        metric_name="random_harvest", 
+        data_value=f"Saved baseline frame: {file_name}", 
+        log_level="INFO"
+    )
+    print(f"🎲 Random Baseline Frame Harvested: {file_name}")
 
 # --- UNIVERSAL SYSTEM LOG CONFIGURATION ---
 CSV_FILE_PATH = "system_telemetry_log.csv"
@@ -193,6 +215,11 @@ def run_vision_pipeline():
             local_badge_status = f"DISTANCE ALERT: {distance_status}"
         elif cropped_chest_frame is not None and cropped_chest_frame.size > 0:
             resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
+            # ====== INTEGRATED: RANDOM BASELINE HARVESTER ======
+            # Roll the dice on any frame where a person is inside the valid zone
+            if random.random() < RANDOM_HARVEST_PROBABILITY:
+                harvest_random_frame(cropped_chest_frame)
+            # ===================================================
             classifier_results = stage2_classifier(resized_crop, verbose=False)
             
             class_mapping = classifier_results[0].names  
