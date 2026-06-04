@@ -13,6 +13,10 @@ from datetime import datetime
 import time
 import random
 
+# --- GLOBAL LIFECYCLE FLAGS ---
+vision_pipeline_active = True  # Controls whether the camera thread loop is allowed to execute
+vision_thread = None           # Persistent tracking slot for the background execution instance
+
 # --- RANDOM SAMPLING CONFIGURATION ---
 # 0.005 means a 0.5% chance per valid frame. At 30 FPS, this captures roughly 
 # one frame every 6-7 seconds of continuous tracking.
@@ -126,6 +130,37 @@ app = FastAPI()
 async def get_dashboard():
     return FileResponse("index.html")
 
+# --- FASTAPI REMOTE LIFE-CONTROL SWITCHES ---
+
+@app.get("/stop")
+async def stop_pipeline():
+    global vision_pipeline_active, telemetry_data
+    if vision_pipeline_active:
+        vision_pipeline_active = False
+        # Push immediate override downstream to update user dashboard UI components
+        telemetry_data = {
+            "badge_status": "PIPELINE PAUSED",
+            "distance_status": "OFFLINE",
+            "estimated_ft": 0.0
+        }
+        log_system_telemetry("pipeline_control", "Pipeline stopped via web API call", "WARNING")
+        return {"status": "success", "message": "Vision processing thread cleanly reaped. Server remains active."}
+    return {"status": "ignored", "message": "Pipeline was already stopped."}
+
+@app.get("/start")
+async def start_pipeline():
+    global vision_pipeline_active, vision_thread
+    if not vision_pipeline_active:
+        vision_pipeline_active = True
+        
+        # Create and spin up a entirely new isolated pipeline lifecycle thread instance
+        vision_thread = threading.Thread(target=run_vision_pipeline, daemon=True)
+        vision_thread.start()
+        
+        log_system_telemetry("pipeline_control", "Pipeline resumed via web API call", "INFO")
+        return {"status": "success", "message": "Vision thread successfully spawned and tracking."}
+    return {"status": "ignored", "message": "Pipeline is already tracking frames."}
+
 # WebSocket Endpoint for direct real-time telemetry streaming
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -142,7 +177,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # --- BACKGROUND THREAD CORE VISION PIPELINE FUNCTION ---
 def run_vision_pipeline():
-    global telemetry_data
+    global telemetry_data, vision_pipeline_active
     
     print("Initializing Stage 1 Pose Joint Tracker...")
     stage1_detector = YOLO("yolov8n-pose.pt") 
@@ -153,11 +188,12 @@ def run_vision_pipeline():
     cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         print("Error: Could not access the webcam stream.")
+        vision_pipeline_active = False
         return
 
     print("\n🚀 Starting Calibrated Distance Two-Stage Pipeline Background Engine.")
 
-    while True:
+    while vision_pipeline_active:
         ret, frame = cap.read()
         if not ret:
             break
@@ -215,11 +251,13 @@ def run_vision_pipeline():
             local_badge_status = f"DISTANCE ALERT: {distance_status}"
         elif cropped_chest_frame is not None and cropped_chest_frame.size > 0:
             resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
+            
             # ====== INTEGRATED: RANDOM BASELINE HARVESTER ======
             # Roll the dice on any frame where a person is inside the valid zone
             if random.random() < RANDOM_HARVEST_PROBABILITY:
                 harvest_random_frame(cropped_chest_frame)
             # ===================================================
+            
             classifier_results = stage2_classifier(resized_crop, verbose=False)
             
             class_mapping = classifier_results[0].names  
@@ -263,10 +301,11 @@ def run_vision_pipeline():
 
         cv2.imshow("Main Camera View", frame)
 
+        # Handle keyboard break conditions cleanly
         if cv2.waitKey(1) & 0xFF == ord('q'):
-            # Trigger manual dictionary wipe if exiting via OpenCV UI
+            vision_pipeline_active = False
             telemetry_data = {
-                "badge_status": "OFFLINE / SHUTDOWN",
+                "badge_status": "PIPELINE PAUSED",
                 "distance_status": "OFFLINE",
                 "estimated_ft": 0.0
             }
@@ -274,6 +313,7 @@ def run_vision_pipeline():
 
     cap.release()
     cv2.destroyAllWindows()
+    print("🎥 Camera hardware released safely. Pipeline stream suspended.")
 
 # --- ENTRY SYSTEM BOOT APEX ---
 if __name__ == "__main__":
@@ -283,7 +323,7 @@ if __name__ == "__main__":
         vision_thread.start()
 
         # 2. Fire up the local network server over internal port 8000
-        # Accessible to anyone on local Wi-Fi at http://<your_pi_ip>:8000
+        # Accessible to anyone on local Wi-Fi at http://<your_ip_or_pi_ip>:8000
         uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
         
     except KeyboardInterrupt:
