@@ -7,3 +7,6 @@ dataset/augmented/
 runs/
 *.pt
 !models/*.pt
+#ignore the data
+*.csv
+*.jpg

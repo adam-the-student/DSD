@@ -40,6 +40,16 @@
         .metric-label { font-size: 0.9rem; color: #8d8d99; text-transform: uppercase; letter-spacing: 1px; }
         .metric-value { font-size: 2.2rem; font-weight: bold; margin-top: 10px; text-align: center; }
         
+        /* Highlight styling for the new counter card */
+        .counter-card {
+            background: linear-gradient(145deg, #1d1d22, #141417);
+            border-left: 5px solid #00ff66;
+        }
+        .counter-value {
+            color: #00ff66;
+            font-size: 3rem;
+        }
+
         /* Status Banner State Engine Styles */
         #status-card { transition: all 0.3s ease; }
         .state-SCANNING { background-color: #1d1d22; color: #e1e1e6; }
@@ -49,17 +59,60 @@
 
         #log-box {
             width: 100%;
-            height: 180px;
+            height: 120px;
             background-color: #09090a;
             border-radius: 6px;
             padding: 10px;
             font-family: 'Courier New', Courier, monospace;
             font-size: 0.85rem;
             overflow-y: auto;
-            color: #00ff66;
+            color: #8d8d99;
             box-sizing: border-box;
             border: 1px solid #29292e;
+            margin-top: 10px;
         }
+        
+        /* New Historical Table Styles */
+        .table-container {
+            width: 100%;
+            max-height: 250px;
+            overflow-y: auto;
+            margin-top: 10px;
+            border: 1px solid #29292e;
+            border-radius: 6px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+        th {
+            background-color: #141417;
+            color: #8d8d99;
+            padding: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.5px;
+            position: sticky;
+            top: 0;
+        }
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #29292e;
+            background-color: #1d1d22;
+        }
+        tr:last-child td { border-bottom: none; }
+        .badge-tag {
+            background-color: rgba(27, 77, 34, 0.4);
+            color: #50fa7b;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
         .network-tag { font-size: 0.8rem; color: #6272a4; margin-top: 5px; }
     </style>
 </head>
@@ -69,6 +122,12 @@
     <div class="network-tag" id="net-status">Connecting to Wall Pi WebSocket...</div>
 
     <div class="container">
+        
+        <div class="card full-width counter-card">
+            <div class="metric-label">Total Valid Room Entries</div>
+            <div class="metric-value counter-value" id="total-entries-count">0</div>
+        </div>
+
         <div class="card full-width" id="status-card">
             <div class="metric-label">Access Authorization Status</div>
             <div class="metric-value" id="badge-status">INITIALIZING SYSTEM</div>
@@ -85,19 +144,40 @@
         </div>
 
         <div class="card full-width">
-            <div style="align-self: flex-start;" class="metric-label">Live Access Event History Log</div>
+            <div style="align-self: flex-start;" class="metric-label">Live Diagnostic Feed</div>
             <div id="log-box"></div>
         </div>
+
+        <div class="card full-width" style="align-items: stretch;">
+            <div class="metric-label" style="margin-bottom: 5px;">Historical Room Entry Ledger</div>
+            <div class="table-container">
+                <table id="entry-ledger">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Event Profile</th>
+                            <th>Max Confidence</th>
+                            <th>Proximity</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ledger-body">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+
     </div>
 
     <script>
-        // Connect directly to the Pi backend using relative WebSockets
         const logBox = document.getElementById('log-box');
         const netStatus = document.getElementById('net-status');
         const statusCard = document.getElementById('status-card');
+        const ledgerBody = document.getElementById('ledger-body');
+        const counterElement = document.getElementById('total-entries-count');
         
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
         let lastLoggedStatus = "";
+        let verifiedEntryCount = 0;
 
         ws.onopen = () => {
             netStatus.textContent = `Connected Live to Wall Pi Frame Server @ ${window.location.host}`;
@@ -114,13 +194,13 @@
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
             
-            // Update Text Metrics
+            // 1. Process Standard Real-Time Frame Telemetry
             document.getElementById('badge-status').textContent = data.badge_status.toUpperCase();
             document.getElementById('distance-value').textContent = `${data.estimated_ft.toFixed(1)} ft`;
             document.getElementById('zone-status').textContent = data.distance_status;
 
             // Dynamically Swap UI Colors Based on System State Match Flags
-            statusCard.className = "card full-width"; // reset
+            statusCard.className = "card full-width"; 
             if (data.distance_status !== "OK") {
                 statusCard.classList.add("state-ALERT");
             } else if (data.badge_status.includes("BADGE DETECTED")) {
@@ -131,17 +211,39 @@
                 statusCard.classList.add("state-SCANNING");
             }
 
-            // Clean Logging Logic - Only appends to text box if state transitions change
+            // Clean Logging Logic for Diagnostic Feed Window
             if (data.badge_status !== lastLoggedStatus && !data.badge_status.includes("SCANNING")) {
-                addLog(`[EVENT] Status shifted to: ${data.badge_status} | Distance: ${data.estimated_ft}ft`);
+                addLog(`[DIAG] State shift: ${data.badge_status}`);
                 lastLoggedStatus = data.badge_status;
+            }
+
+            // 2. NEW FEATURE: Listen for discrete entry pulses fired from the state machine backend
+            if (data.is_entry_event === true) {
+                // Increment HTML UI Counter metric
+                verifiedEntryCount++;
+                counterElement.textContent = verifiedEntryCount;
+                
+                // Append historical metadata details right into the ledger view
+                addLedgerRow(data.event_time, data.max_confidence, data.min_distance);
             }
         };
 
         function addLog(message) {
             const timestamp = new Date().toLocaleTimeString();
             logBox.innerHTML += `[${timestamp}] ${message}<br>`;
-            logBox.scrollTop = logBox.scrollHeight; // Auto-scrolls log to bottom
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        function addLedgerRow(time, confidence, distance) {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${time}</td>
+                <td><span class="badge-tag">Valid Badge Entry</span></td>
+                <td>${confidence}%</td>
+                <td>${distance.toFixed(1)} ft</td>
+            `;
+            // Insert newest rows at the very top of the ledger list
+            ledgerBody.insertBefore(row, ledgerBody.firstChild);
         }
     </script>
 </body>

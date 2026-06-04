@@ -7,6 +7,75 @@ import threading
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 import uvicorn
+import csv
+import os
+from datetime import datetime
+import time
+
+# --- UNIVERSAL SYSTEM LOG CONFIGURATION ---
+CSV_FILE_PATH = "system_telemetry_log.csv"
+
+def initialize_universal_logger():
+    """Establishes the base data matrix infrastructure if not already present on disk."""
+    if not os.path.exists(CSV_FILE_PATH):
+        with open(CSV_FILE_PATH, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            # A completely uniform schema designed to hold any key-value property pair
+            writer.writerow(["Timestamp", "Log_Level", "Metric_Name", "Data_Value"])
+        print(f"📁 Initialized universal systems logger matrix at: {CSV_FILE_PATH}")
+
+# Boot up the file engine immediately
+initialize_universal_logger()
+
+def log_system_telemetry(metric_name: str, data_value, log_level: str = "INFO"):
+    """
+    Appends any arbitrary tracking property or status flag directly to disk.
+    
+    Usage Examples:
+       log_system_telemetry("badge_status", "BADGE_DETECTED (88%)")
+       log_system_telemetry("estimated_ft", 2.4)
+       log_system_telemetry("camera_alert", "TOO CLOSE", log_level="WARNING")
+    """
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(CSV_FILE_PATH, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([current_time, log_level.upper(), metric_name, str(data_value)])
+        return current_time
+    except Exception as e:
+        print(f"⚠️ Telemetry Disk Write Failure: {e}")
+        return current_time
+    
+# --- HARVEST ENGINE CONFIGURATION ---
+EDGE_CASE_DIR = "harvested_edge_cases"
+os.makedirs(EDGE_CASE_DIR, exist_ok=True)
+
+# Cooldown tracker to avoid writing 30 frames a second when standing still
+last_harvest_time = 0.0
+HARVEST_COOLDOWN_SECONDS = 1.5  # Wait at least 1.5 seconds between frame saves
+
+def harvest_uncertain_frame(crop_frame, confidence_pct):
+    """Saves an ambiguous chest crop to disk for future training dataset expansion."""
+    global last_harvest_time
+    current_time = time.time()
+    
+    # Enforce cooldown gate so we don't spam the hard drive
+    if current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS:
+        timestamp_id = int(current_time)
+        file_name = f"edge_{timestamp_id}_{confidence_pct}.jpg"
+        file_path = os.path.join(EDGE_CASE_DIR, file_name)
+        
+        # Save the crisp image file
+        cv2.imwrite(file_path, crop_frame)
+        last_harvest_time = current_time
+        
+        # Log this event into your universal telemetry CSV file!
+        log_system_telemetry(
+            metric_name="data_harvest", 
+            data_value=f"Saved ambiguous frame: {file_name}", 
+            log_level="WARNING"
+        )
+        print(f"📸 Edge Case Harvested: {file_name} saved at {confidence_pct}% confidence.")
 
 # --- CONFIGURATION TUNING CORNER ---
 CLASSIFIER_IMG_SIZE = (224, 224)  
@@ -138,6 +207,8 @@ def run_vision_pipeline():
                     local_badge_status = f"NO BADGE DETECTED ({confidence_percentage}%)"
             else:
                 local_badge_status = f"CALCULATING... ({confidence_percentage}%)"
+                if confidence_percentage >= 40:
+                    harvest_uncertain_frame(cropped_chest_frame, confidence_percentage)
 
             # Render localized windows on the host machine if running desktop debugging
             cv2.imshow("Chest Patch View", cropped_chest_frame)
