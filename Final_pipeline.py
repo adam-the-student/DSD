@@ -1,3 +1,4 @@
+# Note to self before continuing the project, make the bounding box wider and retrain with that
 import cv2
 import numpy as np
 from ultralytics import YOLO
