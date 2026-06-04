@@ -83,8 +83,7 @@ crop_y1 = max(0, crop_y1)
 3. Hysteresis Confidence Thresholding
 To completely kill live indicator flickering, the status text handles a strict 75% confidence gate. If the classifier's internal logic drops into uncertainty, the UI safely falls back to a neutral "CALCULATING..." amber tone instead of bouncing randomly between green and red states.
 
-📦 Getting Started & Usage Guide
-Repository Structure
+# 📦 Getting Started & Usage Guide
 
 ### Repository Structure
 
@@ -99,8 +98,8 @@ DSD/
     └── raw/                 # Local directory for scope expansion images
 ```
 
-### Installation
-# Clone the repository and install the unified framework requirements:
+## Installation
+### Clone the repository and install the unified framework requirements:
 
 ```Bash
 pip install ultralytics opencv-python numpy
