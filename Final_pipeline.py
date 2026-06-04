@@ -4,7 +4,7 @@ import numpy as np
 from ultralytics import YOLO
 import asyncio
 import threading
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 import uvicorn
 import csv
@@ -22,22 +22,6 @@ vision_thread = None           # Persistent tracking slot for the background exe
 # one frame every 6-7 seconds of continuous tracking.
 RANDOM_HARVEST_PROBABILITY = 0.005
 
-def harvest_random_frame(crop_frame):
-    """Saves a random valid chest crop to disk to build a baseline training distribution."""
-    current_time = int(time.time())
-    file_name = f"rand_{current_time}.jpg"
-    file_path = os.path.join(EDGE_CASE_DIR, file_name)
-    
-    cv2.imwrite(file_path, crop_frame)
-    
-    # Log the event to your universal system telemetry CSV file
-    log_system_telemetry(
-        metric_name="random_harvest", 
-        data_value=f"Saved baseline frame: {file_name}", 
-        log_level="INFO"
-    )
-    print(f"🎲 Random Baseline Frame Harvested: {file_name}")
-
 # --- UNIVERSAL SYSTEM LOG CONFIGURATION ---
 CSV_FILE_PATH = "system_telemetry_log.csv"
 
@@ -54,14 +38,7 @@ def initialize_universal_logger():
 initialize_universal_logger()
 
 def log_system_telemetry(metric_name: str, data_value, log_level: str = "INFO"):
-    """
-    Appends any arbitrary tracking property or status flag directly to disk.
-    
-    Usage Examples:
-       log_system_telemetry("badge_status", "BADGE_DETECTED (88%)")
-       log_system_telemetry("estimated_ft", 2.4)
-       log_system_telemetry("camera_alert", "TOO CLOSE", log_level="WARNING")
-    """
+    """Appends any arbitrary tracking property or status flag directly to disk."""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         with open(CSV_FILE_PATH, mode='a', newline='') as file:
@@ -103,6 +80,22 @@ def harvest_uncertain_frame(crop_frame, confidence_pct):
         )
         print(f"📸 Edge Case Harvested: {file_name} saved at {confidence_pct}% confidence.")
 
+def harvest_random_frame(crop_frame):
+    """Saves a random valid chest crop to disk to build a baseline training distribution."""
+    current_time = int(time.time())
+    file_name = f"rand_{current_time}.jpg"
+    file_path = os.path.join(EDGE_CASE_DIR, file_name)
+    
+    cv2.imwrite(file_path, crop_frame)
+    
+    # Log the event to your universal system telemetry CSV file
+    log_system_telemetry(
+        metric_name="random_harvest", 
+        data_value=f"Saved baseline frame: {file_name}", 
+        log_level="INFO"
+    )
+    print(f"🎲 Random Baseline Frame Harvested: {file_name}")
+
 # --- CONFIGURATION TUNING CORNER ---
 CLASSIFIER_IMG_SIZE = (224, 224)  
 CONFIDENCE_THRESHOLD = 60  # Minimum % required to change state (stops flickering)
@@ -122,7 +115,7 @@ telemetry_data = {
     "estimated_ft": 0.0
 }
 
-# --- INITIALIZE NETWORK SERVER LAYER ---
+# --- INITIALIZE NETWORK SERVER LAYER (Must happen before route decorators) ---
 app = FastAPI()
 
 # Serve your custom lightweight static access panel directly over root route
@@ -153,7 +146,7 @@ async def start_pipeline():
     if not vision_pipeline_active:
         vision_pipeline_active = True
         
-        # Create and spin up a entirely new isolated pipeline lifecycle thread instance
+        # Create and spin up an entirely new isolated pipeline lifecycle thread instance
         vision_thread = threading.Thread(target=run_vision_pipeline, daemon=True)
         vision_thread.start()
         
@@ -170,10 +163,17 @@ async def websocket_endpoint(websocket: WebSocket):
             # Continuously broadcast global telemetry values to browser clients 20x a second
             await websocket.send_json(telemetry_data)
             await asyncio.sleep(0.05)
-    except Exception as e:
+    except WebSocketDisconnect:
+        # Caught normal browser tab closures or camera resets cleanly
         pass
+    except Exception as e:
+        print(f"📡 WebSocket Link Stream Reset: {e}")
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except RuntimeError:
+            # Connection was already stripped by host browser; pass silently
+            pass
 
 # --- BACKGROUND THREAD CORE VISION PIPELINE FUNCTION ---
 def run_vision_pipeline():
@@ -253,7 +253,6 @@ def run_vision_pipeline():
             resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
             
             # ====== INTEGRATED: RANDOM BASELINE HARVESTER ======
-            # Roll the dice on any frame where a person is inside the valid zone
             if random.random() < RANDOM_HARVEST_PROBABILITY:
                 harvest_random_frame(cropped_chest_frame)
             # ===================================================
@@ -278,12 +277,13 @@ def run_vision_pipeline():
             # Render localized windows on the host machine if running desktop debugging
             cv2.imshow("Chest Patch View", cropped_chest_frame)
 
-        # Update Thread-Safe Memory Map dictionary for WebSocket Broadcaster
-        telemetry_data = {
-            "badge_status": local_badge_status,
-            "distance_status": distance_status,
-            "estimated_ft": estimated_ft
-        }
+        # Update Thread-Safe Memory Map dictionary ONLY if the pipeline is still active
+        if vision_pipeline_active:
+            telemetry_data = {
+                "badge_status": local_badge_status,
+                "distance_status": distance_status,
+                "estimated_ft": estimated_ft
+            }
 
         # --- LOCAL HOST MONITOR RENDERING ---
         if crop_x2 > 0 and crop_y2 > 0:
@@ -301,7 +301,7 @@ def run_vision_pipeline():
 
         cv2.imshow("Main Camera View", frame)
 
-        # Handle keyboard break conditions cleanly
+        # Handle manual window thread exit checks
         if cv2.waitKey(1) & 0xFF == ord('q'):
             vision_pipeline_active = False
             telemetry_data = {
@@ -323,14 +323,12 @@ if __name__ == "__main__":
         vision_thread.start()
 
         # 2. Fire up the local network server over internal port 8000
-        # Accessible to anyone on local Wi-Fi at http://<your_ip_or_pi_ip>:8000
         uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
         
     except KeyboardInterrupt:
         print("\nStopping network broadcast server...")
         
     finally:
-        # Clear out telemetry cache values so remaining socket frames push offline status
         telemetry_data = {
             "badge_status": "OFFLINE / SHUTDOWN",
             "distance_status": "OFFLINE",

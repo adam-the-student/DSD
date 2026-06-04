@@ -40,7 +40,7 @@
         .metric-label { font-size: 0.9rem; color: #8d8d99; text-transform: uppercase; letter-spacing: 1px; }
         .metric-value { font-size: 2.2rem; font-weight: bold; margin-top: 10px; text-align: center; }
         
-        /* Highlight styling for the new counter card */
+        /* Highlight styling for the counter card */
         .counter-card {
             background: linear-gradient(145deg, #1d1d22, #141417);
             border-left: 5px solid #00ff66;
@@ -48,6 +48,46 @@
         .counter-value {
             color: #00ff66;
             font-size: 3rem;
+        }
+
+        /* Camera Remote Control Buttons */
+        .control-container {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+            width: 100%;
+            max-width: 400px;
+        }
+        .ctrl-btn {
+            flex: 1;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .start-btn {
+            background-color: #2e7d32;
+            color: #afffaf;
+        }
+        .start-btn:hover {
+            background-color: #1b5e20;
+            box-shadow: 0 0 8px rgba(46, 125, 50, 0.4);
+        }
+        .stop-btn {
+            background-color: #c62828;
+            color: #ffb3b3;
+        }
+        .stop-btn:hover {
+            background-color: #b71c1c;
+            box-shadow: 0 0 8px rgba(198, 40, 40, 0.4);
+        }
+        .ctrl-btn:active {
+            transform: scale(0.98);
         }
 
         /* Status Banner State Engine Styles */
@@ -72,7 +112,7 @@
             margin-top: 10px;
         }
         
-        /* New Historical Table Styles */
+        /* Historical Table Styles */
         .table-container {
             width: 100%;
             max-height: 250px;
@@ -126,6 +166,11 @@
         <div class="card full-width counter-card">
             <div class="metric-label">Total Valid Room Entries</div>
             <div class="metric-value counter-value" id="total-entries-count">0</div>
+            
+            <div class="control-container">
+                <button id="btn-start" class="ctrl-btn start-btn" onclick="toggleCamera('start')">Start Camera</button>
+                <button id="btn-stop" class="ctrl-btn stop-btn" onclick="toggleCamera('stop')">Stop Camera</button>
+            </div>
         </div>
 
         <div class="card full-width" id="status-card">
@@ -201,7 +246,7 @@
 
             // Dynamically Swap UI Colors Based on System State Match Flags
             statusCard.className = "card full-width"; 
-            if (data.distance_status !== "OK") {
+            if (data.distance_status !== "OK" && data.distance_status !== "OFFLINE") {
                 statusCard.classList.add("state-ALERT");
             } else if (data.badge_status.includes("BADGE DETECTED")) {
                 statusCard.classList.add("state-BADGE");
@@ -217,7 +262,7 @@
                 lastLoggedStatus = data.badge_status;
             }
 
-            // 2. NEW FEATURE: Listen for discrete entry pulses fired from the state machine backend
+            // 2. Listen for discrete entry pulses fired from the state machine backend
             if (data.is_entry_event === true) {
                 // Increment HTML UI Counter metric
                 verifiedEntryCount++;
@@ -244,6 +289,22 @@
             `;
             // Insert newest rows at the very top of the ledger list
             ledgerBody.insertBefore(row, ledgerBody.firstChild);
+        }
+
+        // Function to talk directly to the FastAPI lifecycle endpoints
+        function toggleCamera(action) {
+            fetch(`/${action}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === "success") {
+                        addLog(`[SYSTEM] ${data.message}`);
+                    } else {
+                        addLog(`[SYSTEM] Command ignored: ${data.message}`);
+                    }
+                })
+                .catch(err => {
+                    addLog(`[ERROR] Failed to execute camera command: ${err}`);
+                });
         }
     </script>
 </body>
