@@ -1,4 +1,4 @@
-# Dosimetor Sensing Device (DSD) Detection Pipeline
+# Digital Security Badge (DSD) Detection Pipeline
 
 A robust, real-time, two-stage computer vision pipeline designed to verify if a user is wearing an identification badge using a standard webcam stream. This project is engineered to deploy seamlessly on resource-constrained edge devices, such as a Raspberry Pi equipped with an AI acceleration hat.
 
@@ -68,7 +68,7 @@ graph LR
 ### 1. Calibrated Triangular Distance Gating
 The script calculates the user's physical distance from the lens using your calibrated hardware factors:
 
-$$\text{Distance (Inches)} = \frac{\text{REAL\_SHOULDER\_WIDTH\_INCHES} \times \text{FOCAL\_LENGTH\_FACTOR}}{\text{Shoulder Width (Pixels)}}$$
+$$\text{Distance (Inches)} = \frac{\text{Real Shoulder Width} \times \text{Focal Length Factor}}{\text{Shoulder Width (Pixels)}}$$
 
 If you step outside the safe testing zone (**1.5ft to 4.5ft**), the pipeline gates the classifier and throws a distance safety alert to prevent blind background guessing.
 
