@@ -1,4 +1,4 @@
-# Dosimeter Sensing Device (DSD) Detection Pipeline
+# Digital Security Badge (DSD) Detection Pipeline
 
 A robust, real-time, two-stage computer vision pipeline designed to verify if a user is wearing an identification badge using a standard webcam stream. This project is engineered to deploy seamlessly on resource-constrained edge devices, such as a Raspberry Pi equipped with an AI acceleration hat.
 

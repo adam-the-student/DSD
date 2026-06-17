@@ -1,4 +1,12 @@
 # Note to self before continuing the project, make the bounding box wider and retrain with that
+import os
+import sys
+IS_SSH_SESSION = "SSH_CLIENT" in os.environ or "SSH_TTY" in os.environ
+
+if IS_SSH_SESSION:
+    # Force headless operation parameters before importing cv2
+    os.environ["OPENCV_HEADLESS"] = "1"
+
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -6,42 +14,70 @@ import asyncio
 import threading
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 import csv
-import os
 from datetime import datetime
 import time
 import random
 from picamera2 import Picamera2
+import libcamera
+from libcamera import Transform
+
 
 # --- GLOBAL LIFECYCLE FLAGS ---
 vision_pipeline_active = True  
 vision_thread = None           
 picam = None                   
+ALLOW_GUI_DISPLAY = not IS_SSH_SESSION  
 
 # --- RANDOM SAMPLING CONFIGURATION ---
-# 🟢 Upped to 5% chance per frame for harvesting a solid baseline production dataset
-RANDOM_HARVEST_PROBABILITY = 0.05
+RANDOM_HARVEST_PROBABILITY = 0.005
 
 # --- UNIVERSAL SYSTEM LOG CONFIGURATION ---
-CSV_FILE_PATH = "system_telemetry_log.csv"
+# 🟢 Dynamic filename helper
+def get_daily_csv_path():
+    """Generates a file path unique to the current calendar date inside a 'logs' folder."""
+    # 1. Create a path to a 'logs' folder
+    log_dir = "logs"
+    
+    # 🟢 Automatically build the directory if it isn't there yet
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+        print(f"📁 Created new permanent archive directory: ./{log_dir}/")
+        
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # 🟢 Returns 'logs/telemetry_2026-06-16.csv'
+    return os.path.join(log_dir, f"telemetry_{date_str}.csv")
+
 
 def initialize_universal_logger():
     """Establishes the base data matrix infrastructure if not already present on disk."""
-    if not os.path.exists(CSV_FILE_PATH):
-        with open(CSV_FILE_PATH, mode='w', newline='') as file:
+    target_csv = get_daily_csv_path()
+    if not os.path.exists(target_csv):
+        with open(target_csv, mode='w', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(["Timestamp", "Log_Level", "Metric_Name", "Data_Value"])
-        print(f"📁 Initialized universal systems logger matrix at: {CSV_FILE_PATH}")
+        print(f"📁 Initialized universal systems logger matrix at: {target_csv}")
 
 initialize_universal_logger()
 
 def log_system_telemetry(metric_name: str, data_value, log_level: str = "INFO"):
-    """Appends any arbitrary tracking property or status flag directly to disk."""
+    """Appends any arbitrary tracking property or status flag directly to disk with auto-headers."""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    target_csv = get_daily_csv_path()
     try:
-        with open(CSV_FILE_PATH, mode='a', newline='') as file:
+        # 🟢 Check if the file already exists and has content before opening it
+        file_exists = os.path.exists(target_csv) and os.path.getsize(target_csv) > 0
+        
+        with open(target_csv, mode='a', newline='', errors='ignore') as file:
             writer = csv.writer(file)
+            
+            # 🟢 Inject headers if this is a brand new or freshly cleared file
+            if not file_exists:
+                writer.writerow(["Timestamp", "Log_Level", "Metric_Name", "Data_Value"])
+                
             writer.writerow([current_time, log_level.upper(), metric_name, str(data_value)])
         return current_time
     except Exception as e:
@@ -97,7 +133,7 @@ class BadgeTrackerStateMachine:
         self.current_user_max_confidence = 0
         self.current_user_final_decision = "UNKNOWN"
         self.frames_since_last_seen = 0
-        self.max_lost_frames = 15  
+        self.max_lost_frames = 15  # Tolerate ~0.5s of frame drops before logging departure
 
     def update_presence(self, person_detected: bool):
         """Tracks arrivals and departures to reset or trigger logging summary events."""
@@ -122,6 +158,7 @@ class BadgeTrackerStateMachine:
                 self.current_user_max_confidence = confidence
                 self.current_user_final_decision = decision
 
+            # High confidence locks the evaluation to conserve system resources
             if confidence >= 85:
                 self.state = "LOCKED"
                 print(f"🔒 State LOCKED: {decision} confirmed at {confidence}%.")
@@ -151,7 +188,7 @@ REAL_SHOULDER_WIDTH_INCHES = 17.0
 FOCAL_LENGTH_FACTOR = 1600  
 
 MIN_DISTANCE_FEET = 1   
-MAX_DISTANCE_FEET = 4.5   
+MAX_DISTANCE_FEET = 20   
 
 telemetry_data = {
     "badge_status": "INITIALIZING...",
@@ -162,30 +199,78 @@ telemetry_data = {
 # --- INITIALIZE NETWORK SERVER LAYER ---
 app = FastAPI()
 
+app.mount("/static", StaticFiles(directory="web"), name="static")
+
 @app.get("/")
 async def get_dashboard():
-    return FileResponse("Index.html")
+    return FileResponse("web/Index.html")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    
+    startup_history = []
+    target_csv = get_daily_csv_path() # 🟢 Target only today's dynamic log file!
+    
+    if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
+        try:
+            with open(target_csv, mode='r', errors='ignore') as file:
+                explicit_headers = ["timestamp", "log_level", "metric_name", "data_value"]
+                reader = csv.DictReader(file, fieldnames=explicit_headers)
+                
+                for row in reader:
+                    if not row.get("metric_name") or not row.get("data_value"):
+                        continue
+                        
+                    metric_name = row["metric_name"].strip()
+                    raw_val = row["data_value"].strip()
+                    
+                    if metric_name in ["wearer_departure_summary", "state_machine"]:
+                        if "Decision:" in raw_val:
+                            if "BADGE DETECTED" in raw_val and "NO BADGE" not in raw_val:
+                                profile_label = "Valid Badge Entry"
+                            else:
+                                profile_label = "No Badge"
+                            
+                            if "UNKNOWN" in raw_val:
+                                profile_label = "❌ Unknown Status"
+                            
+                            conf = "N/A"
+                            if "Max Conf:" in raw_val:
+                                conf = raw_val.split("Max Conf:")[-1].strip()
+                                
+                            time_stamp = row.get("timestamp", "").strip()
+                            if " " in time_stamp:
+                                time_stamp = time_stamp.split(" ")[-1]
+                                
+                            startup_history.append({
+                                "time": time_stamp,
+                                "profile": profile_label,
+                                "confidence": conf,
+                                "proximity": "3.5 ft"
+                            })
+        except Exception as e:
+            print(f"⚠️ Error building startup historical ledger: {e}")
+
+    # Send the specialized bootstrap historical data payload
+    if startup_history:
+        await websocket.send_json({
+            "is_startup_history": True,
+            "history": startup_history
+        })
+
+    # Continuous live diagnostic and frame streaming loop
     try:
         while True:
             await websocket.send_json(telemetry_data)
+            if telemetry_data.get("is_entry_event") == True:
+                telemetry_data["is_entry_event"] = False
             await asyncio.sleep(0.05)
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        print(f"📡 WebSocket Link Stream Reset: {e}")
-    finally:
-        try:
-            await websocket.close()
-        except RuntimeError:
-            pass
 
-# --- BACKGROUND THREAD CORE VISION PIPELINE FUNCTION ---
 def run_vision_pipeline():
-    global telemetry_data, picam
+    global telemetry_data, picam, ALLOW_GUI_DISPLAY
     
     tracker = BadgeTrackerStateMachine()
     
@@ -200,7 +285,7 @@ def run_vision_pipeline():
     while True:
         try:
             raw_frame = picam.capture_array()
-            frame = cv2.flip(raw_frame, -1)
+            frame = raw_frame
         except Exception as e:
             print(f"Frame capture interruption: {e}")
             time.sleep(0.1)
@@ -288,15 +373,18 @@ def run_vision_pipeline():
             if tracker.state != "LOCKED" and local_badge_status in ["BADGE DETECTED", "NO BADGE DETECTED"]:
                 tracker.update_evaluation(local_badge_status, confidence_percentage)
 
-            cv2.imshow("Chest Patch View", cropped_chest_frame)
+            # 🔒 Render crop preview window only if GUI environment is active
+            if ALLOW_GUI_DISPLAY:
+                cv2.imshow("Chest Patch View", cropped_chest_frame)
 
         telemetry_data = {
             "badge_status": f"{local_badge_status} ({tracker.current_user_max_confidence}%)" if tracker.state != "IDLE" else "SCANNING...",
             "distance_status": distance_status,
-            "estimated_ft": estimated_ft if person_in_frame else 0.0
+            "estimated_ft": estimated_ft if person_in_frame else 0.0,
+            "history": telemetry_data.get("history", [])  # 🟢 Preserves persistent Rad Tech log array
         }
 
-        if crop_x2 > 0 and crop_y2 > 0:
+        if crop_x2 > 0 and crop_y2 > 0 and ALLOW_GUI_DISPLAY:  # 🔒 Safeguarded drawing layer
             box_color = (0, 255, 0) if "BADGE DETECTED" in local_badge_status else (0, 0, 255)
             if distance_status != "OK" or "CALCULATING" in local_badge_status:
                 box_color = (0, 165, 255)
@@ -309,25 +397,45 @@ def run_vision_pipeline():
             cv2.putText(frame, live_telemetry, (crop_x1, crop_y1 - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.50, box_color, 2, cv2.LINE_AA)
 
-        cv2.imshow("Main Camera View", frame)
+        # 🟢 HEADLESS FALLBACK DISPLAY MANAGER
+        if ALLOW_GUI_DISPLAY:
+            try:
+                cv2.imshow("Main Camera View", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            except cv2.error as e:
+                # Catches XCB connection/display initialization issues smoothly
+                print("\n🖥️ No display environment detected (Headless SSH Session). Disabling window rendering layout.")
+                print("📊 Live telemetry is still streaming to the FastAPI Web Dashboard link!")
+                ALLOW_GUI_DISPLAY = False
+        else:
+            # Yield microsecond execution frame alignment step during headless passes
+            time.sleep(0.001)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cv2.destroyAllWindows()
+    try:
+        cv2.destroyAllWindows()
+    except:
+        pass
     print("🎥 Vision pipeline loop processing suspended.")
 
 # --- ENTRY SYSTEM BOOT APEX ---
 if __name__ == "__main__":
     print("Initializing Master Hardware Camera Stream...")
     picam = Picamera2()
-    config = picam.create_video_configuration()
-    config["main"]["size"] = (1920, 1080)
-    config["main"]["format"] = "RGB888"
-    config["controls"]["FrameRate"] = 30
+    
+    # 🟢 PASS THE ISP FLIP DIRECTLY INSIDE THE CONFIGURATION BUILDER
+    config = picam.create_video_configuration(
+        {"size": (1280, 720), "format": "RGB888"}, 
+        transform=Transform(hflip=True, vflip=True)
+    )
+    
+    # Set your other performance optimizations
+    config["main"]["buffer_count"] = 6
+    config["controls"]["FrameRate"] = 60
+    
     picam.configure(config)
     picam.start()
-    print("🔌 Native Raspberry Pi 5 Hardware Camera Stream Initialized.")
+    print("🔌 Optimized 60FPS Native Hardware Camera Stream Initialized.")
 
     try:
         vision_thread = threading.Thread(target=run_vision_pipeline, daemon=True)
