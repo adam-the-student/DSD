@@ -10,3 +10,10 @@ runs/
 #ignore the data
 *.csv
 *.jpg
+dataset/
+#ignore encyption
+*.enc
+*.key
+#ignore bitthing.
+__pycache__/
+*.pyc
