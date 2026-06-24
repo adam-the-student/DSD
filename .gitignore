@@ -17,3 +17,5 @@ dataset/
 #ignore bitthing.
 __pycache__/
 *.pyc
+*.hef
+*.log
