@@ -1,4 +1,3 @@
-# Final_pipeline.py
 import os
 import sys
 IS_SSH_SESSION = "SSH_CLIENT" in os.environ or "SSH_TTY" in os.environ
@@ -88,12 +87,9 @@ class BadgeTrackerStateMachine:
         global event_queue
         from datetime import datetime
 
-        if "NO BADGE" in self.current_user_final_decision or self.current_user_final_decision == "UNKNOWN":
-            log_level = "ERROR"
-            profile_string = "No Badge"
-        else:
-            log_level = "INFO"
-            profile_string = "Valid Badge Entry"
+        # Dynamic profile parsing for the log string file layout
+        profile_string = self.current_user_final_decision.title()
+        log_level = "INFO" if "NO" not in self.current_user_final_decision.upper() and self.current_user_final_decision != "UNKNOWN" else "ERROR"
         
         # 1. Update disk backup ledger
         log_system_telemetry(
@@ -112,7 +108,6 @@ class BadgeTrackerStateMachine:
         }
         event_queue.put(payload)
                     
-        # 🟢 Clean, original terminal message layout style
         print(f"🚶 Person departed. Summary logged: {profile_string}")
         
         # Reset State Engine
@@ -130,7 +125,7 @@ REAL_SHOULDER_WIDTH_INCHES = 17.0
 FOCAL_LENGTH_FACTOR = 1600  
 
 MIN_DISTANCE_FEET = 1    
-MAX_DISTANCE_FEET = 20   
+MAX_DISTANCE_FEET = 20  
 
 telemetry_data = {
     "badge_status": "INITIALIZING...",
@@ -175,13 +170,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     if metric_name == "wearer_departure_summary":
                         if "Decision:" in raw_val:
-                            if "BADGE DETECTED" in raw_val and "NO BADGE" not in raw_val:
-                                profile_label = "Valid Badge Entry"
-                            else:
-                                profile_label = "No Badge"
+                            # Extract profile label securely without assuming folder names
+                            parsed_decision = raw_val.split("Decision:")[-1].split("|")[0].strip()
                             
                             if "UNKNOWN" in raw_val:
                                 profile_label = "❌ Unknown Status"
+                            else:
+                                profile_label = parsed_decision.title()
                             
                             conf = "N/A"
                             if "Max Conf:" in raw_val:
@@ -210,7 +205,6 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             global event_queue
             
-            # Flush live milestone packets quietly
             try:
                 while not event_queue.empty():
                     live_alert = event_queue.get_nowait()
@@ -220,7 +214,6 @@ async def websocket_endpoint(websocket: WebSocket):
             except queue.Empty:
                 pass
             
-            # Send continuous HUD updates
             current_snapshot = dict(telemetry_data)
             await websocket.send_json(current_snapshot)
                 
@@ -235,24 +228,25 @@ def run_vision_pipeline():
     
     tracker = BadgeTrackerStateMachine()
     
-    print("Initializing Stage 1 Pose Joint Tracker...")
-    stage1_detector = YOLO("yolov8n-pose.pt") 
+    print("Initializing Stage 1 Pose Joint Tracker via NPU...")
+    stage1_detector = YOLO("yolov8n-pose")
 
-    print("Initializing Stage 2 Custom Badge Classifier...")
-    stage2_classifier = YOLO("models/badgeClassifier.pt")
+    print("Initializing Stage 2 Custom Model Zoo Classifier...")
+    stage2_classifier = YOLO("models/dosClassifier.pt")
 
     print("\n🚀 Starting Calibrated Distance Two-Stage Pipeline Background Engine.")
 
     while True:
         try:
             raw_frame = picam.capture_array()
-            frame = raw_frame
+            frame = cv2.resize(raw_frame, (640, 480))
+            frame = np.ascontiguousarray(frame)
         except Exception as e:
             print(f"Frame capture interruption: {e}")
             time.sleep(0.1)
             continue
 
-        detector_results = stage1_detector(frame, verbose=False, imgsz=320)
+        detector_results = stage1_detector(frame, verbose=False, imgsz=640)
         
         person_in_frame = False
         crop_x1, crop_y1, crop_x2, crop_y2 = 0, 0, 0, 0
@@ -260,7 +254,11 @@ def run_vision_pipeline():
         distance_status = "SEARCHING"
         estimated_ft = 0.0
         local_badge_status = "SCANNING..."
-        confidence_percentage = 0
+        
+        # Dictionary container to hold dynamic classes and scores without hardcoding
+        active_probabilities = {}
+        top_confidence = 0
+        predicted_folder_name = "UNKNOWN"
 
         for result in detector_results:
             if result.keypoints is not None and len(result.keypoints.xy) > 0:
@@ -298,7 +296,6 @@ def run_vision_pipeline():
                         cropped_chest_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
                     break
 
-        # Check departure pulse
         has_departed = tracker.update_presence(person_in_frame)
         if has_departed:
             tracker.trigger_departure_event(frame, detector_results)
@@ -316,67 +313,72 @@ def run_vision_pipeline():
                 )
                 if enc_file:
                     log_system_telemetry("random_harvest", f"Saved baseline frame: {enc_file}", "INFO")
-                    tech_label = " [Tech Bypass]" if identified_as_tech else ""
-                    print(f"🎲 Random Baseline Crop Harvested: {enc_file}{tech_label}")
 
-        # 2. INDEPENDENT CLASSIFIER BLOCK
+        # 2. FULLY DYNAMIC DECODER BLOCK (NO HARDCODED STRINGS)
         if tracker.state != "LOCKED" and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
             resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
             classifier_results = stage2_classifier(resized_crop, verbose=False, imgsz=224)
             
+            # Pull dataset mappings and values dynamically directly from model properties
             class_mapping = classifier_results[0].names  
-            top_prediction_id = classifier_results[0].probs.top1
-            confidence_percentage = int(classifier_results[0].probs.top1conf.item() * 100)
-            predicted_folder_name = class_mapping[top_prediction_id]
+            probs_tensor = classifier_results[0].probs.data.cpu().numpy()
+            
+            # Automatically populate all outputs into a dictionary container
+            for idx, class_name in class_mapping.items():
+                active_probabilities[class_name.upper()] = int(probs_tensor[idx] * 100)
 
-            if confidence_percentage >= CONFIDENCE_THRESHOLD:
-                local_badge_status = "BADGE DETECTED" if predicted_folder_name == "badge" else "NO BADGE DETECTED"
+            top_prediction_id = classifier_results[0].probs.top1
+            predicted_folder_name = class_mapping[top_prediction_id].upper()
+            top_confidence = int(classifier_results[0].probs.top1conf.item() * 100)
+
+            # Assign status using the folder name dynamically
+            if top_confidence >= CONFIDENCE_THRESHOLD:
+                local_badge_status = f"{predicted_folder_name} DETECTED"
             else:
                 local_badge_status = "CALCULATING..."
                 current_time = time.time()
-                if confidence_percentage >= 40 and (current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS):
+                if top_confidence >= 40 and (current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS):
                     identified_as_tech = False
                     enc_file = save_anonymized_and_encrypted_frame(
                         cropped_chest_frame, detector_results, prefix="edge", 
-                        extra_suffix=str(confidence_percentage), crop_offsets=(crop_x1, crop_y1),
+                        extra_suffix=str(top_confidence), crop_offsets=(crop_x1, crop_y1),
                         is_rad_tech=identified_as_tech
                     )
                     if enc_file:
                         last_harvest_time = current_time
                         log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
-                        tech_label = " [Tech Bypass]" if identified_as_tech else ""
-                        print(f"📸 Edge Case Crop Harvested: {enc_file} saved securely ({confidence_percentage}% confidence){tech_label}")
             
-            if local_badge_status in ["BADGE DETECTED", "NO BADGE DETECTED"]:
-                tracker.update_evaluation(local_badge_status, confidence_percentage)
-            else:
-                local_badge_status = "CALCULATING..."
+            if local_badge_status != "CALCULATING...":
+                tracker.update_evaluation(local_badge_status, top_confidence)
 
-        # 🟢 FIX: Keep the event active across frame updates so the WebSocket has time to catch it!
         has_active_event = telemetry_data.get("is_entry_event", False)
         
-        # Pull transactional values if they are alive in dictionary memory right now
         evt_time = telemetry_data.get("time", None)
         evt_prof = telemetry_data.get("profile", None)
         evt_conf = telemetry_data.get("confidence", None)
         evt_prox = telemetry_data.get("proximity", None)
 
+        # Build dynamic HUD score readouts loop securely
+        score_readouts = " | ".join([f"{k}: {v}%" for k, v in active_probabilities.items()])
+        HUD_badge_string = f"{local_badge_status} ({score_readouts})" if tracker.state != "IDLE" else "SCANNING..."
+        
         telemetry_data.update({
-            "badge_status": f"{local_badge_status} ({tracker.current_user_max_confidence}%)" if tracker.state != "IDLE" else "SCANNING...",
+            "badge_status": HUD_badge_string,
             "distance_status": distance_status,
             "estimated_ft": estimated_ft if person_in_frame else 0.0,
             "is_entry_event": has_active_event
         })
         
-        # If an event is currently pending transmission, lock its keys back onto the frame payload state
         if has_active_event:
             telemetry_data["time"] = evt_time
             telemetry_data["profile"] = evt_prof
             telemetry_data["confidence"] = evt_conf
             telemetry_data["proximity"] = evt_prox
 
+        # --- ONSCREEN RENDERING OVERLAYS ---
         if crop_x2 > 0 and crop_y2 > 0 and ALLOW_GUI_DISPLAY:  
-            box_color = (0, 255, 0) if "BADGE DETECTED" in local_badge_status else (0, 0, 255)
+            # Select bounding box boundaries colors dynamically
+            box_color = (0, 255, 0) if "NO" not in local_badge_status and "DETECTED" in local_badge_status else (0, 0, 255)
             if distance_status != "OK" or "CALCULATING" in local_badge_status:
                 box_color = (0, 165, 255)
 
@@ -384,9 +386,14 @@ def run_vision_pipeline():
             cv2.circle(frame, (ls_x, ls_y), 5, (255, 0, 0), 2)
             cv2.circle(frame, (rs_x, rs_y), 5, (255, 0, 0), 2)
             
-            live_telemetry = f"{local_badge_status} | Dist: {estimated_ft}ft"
-            cv2.putText(frame, live_telemetry, (crop_x1, crop_y1 - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, box_color, 2, cv2.LINE_AA)
+            # Dynamic line renderings
+            text_line1 = f"STATUS: {local_badge_status}"
+            text_line2 = score_readouts
+            text_line3 = f"PROXIMITY: {estimated_ft} ft"
+            
+            cv2.putText(frame, text_line1, (crop_x1, crop_y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2, cv2.LINE_AA)
+            cv2.putText(frame, text_line2, (crop_x1, crop_y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(frame, text_line3, (crop_x1, crop_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
 
         if ALLOW_GUI_DISPLAY:
             try:
@@ -394,7 +401,7 @@ def run_vision_pipeline():
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             except cv2.error:
-                print("\n🖥️ No display environment detected (Headless SSH Session). Disabling window rendering layout.")
+                print("\n🖥️ Headless mode active. Disabling GUI display canvas windows.")
                 ALLOW_GUI_DISPLAY = False
         else:
             time.sleep(0.001)
@@ -404,15 +411,13 @@ def run_vision_pipeline():
     except:
         pass
 
-# --- ENTRY SYSTEM BOOT APEX ---
+# --- SYSTEM INITIALIZATION BOOT ---
 if __name__ == "__main__":
-    import json
     print("Initializing Master Hardware Camera Stream...")
     picam = Picamera2()
     
     config = picam.create_video_configuration(
-        {"size": (1280, 720), "format": "RGB888"}, 
-        transform=Transform(hflip=True, vflip=True)
+        {"size": (1280, 960), "format": "RGB888"}
     )
     config["main"]["buffer_count"] = 6
     config["controls"]["FrameRate"] = 60

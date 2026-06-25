@@ -15,6 +15,7 @@ os.makedirs(save_dir, exist_ok=True)
 #                         CAMERA CALIBRATION CONFIGURATION
 # ==============================================================================
 REAL_SHOULDER_WIDTH_INCHES = 17.0
+# Adjusted because pulling from a wider sensor profile changes the pixel projection scale
 FOCAL_LENGTH_FACTOR = 318 
 # ==============================================================================
 
@@ -34,12 +35,13 @@ for output_name in infer_model.output_names:
 
 input_name = infer_model.input_names[0]
 
-# --- INITIALIZE NATIVE RASPBERRY PI CAMERA BACKEND ---
+# --- INITIALIZE WIDE FOV RASPBERRY PI CAMERA BACKEND ---
 print("Initializing Picamera2 pipeline...")
 picam = Picamera2()
 
-config = picam.create_video_configuration(main={"size": (640, 480)})
-config["transform"] = libcamera.Transform(hflip=True, vflip=True)
+# FIXED: Requesting a full 4:3 sensor binning resolution forces libcamera to use the full lens FOV
+config = picam.create_video_configuration(main={"size": (1280, 960)})
+#config["transform"] = libcamera.Transform(hflip=True, vflip=True)
 picam.configure(config)
 picam.start()
 
@@ -51,9 +53,9 @@ img_counter = len(existing_files)
 
 # Map out multi-scale layers alongside their mathematical downsampling pixel strides
 layer_pairs = [
-    {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  # 20x20 -> 640/20 = 32
-    {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  # 40x40 -> 640/40 = 16
-    {"score": "yolov8s_pose/conv44", "keypoint": "yolov8s_pose/conv45", "stride": 8}    # 80x80 -> 640/80 = 8
+    {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  # 20x20
+    {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  # 40x40
+    {"score": "yolov8s_pose/conv44", "keypoint": "yolov8s_pose/conv45", "stride": 8}    # 80x80
 ]
 
 def sigmoid(x):
@@ -69,8 +71,13 @@ try:
             bindings.output(name).set_buffer(output_buffers[name])
 
         while True:
-            raw_frame = picam.capture_array()
-            frame = np.ascontiguousarray(raw_frame)
+            # 1. Grab the full-sensor high-resolution frame from the hardware pipeline
+            raw_large_frame = picam.capture_array()
+            
+            # 2. Resize it down to our 640x480 workspace so the rest of the math stays the same
+            # This compresses the wider FOV view into your display canvas area
+            frame = cv2.resize(raw_large_frame, (640, 480))
+            frame = np.ascontiguousarray(frame)
             
             if frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
@@ -92,7 +99,7 @@ try:
             best_ls_x, best_ls_y = 0, 0
             best_rs_x, best_rs_y = 0, 0
 
-            # --- DECODE MULTI-SCALE GRIDS WITH SPATIAL ANCHORING ---
+            # --- DECODE MULTI-SCALE GRIDS ---
             for pair in layer_pairs:
                 score_tensor = output_buffers[pair["score"]]      
                 keypoint_tensor = output_buffers[pair["keypoint"]]  
@@ -107,14 +114,11 @@ try:
                         if raw_score > best_score:
                             kp_data = keypoint_tensor[h, w]
                             
-                            # Extract localized grid anchor offsets
                             ls_x_offset = kp_data[15]
                             ls_y_offset = kp_data[16]
                             rs_x_offset = kp_data[18]
                             rs_y_offset = kp_data[19]
                             
-                            # Reconstruct global 640x640 input resolution landmarks mathematically:
-                            # Center-point location = ((center_offset * 2) + grid_index) * stride
                             global_ls_x = ((ls_x_offset * 2.0) + w) * stride
                             global_ls_y = ((ls_y_offset * 2.0) + h) * stride
                             global_rs_x = ((rs_x_offset * 2.0) + w) * stride
@@ -122,7 +126,6 @@ try:
                             
                             best_score = raw_score
                             
-                            # Map coordinates back into our 640x480 video canvas smoothly
                             best_ls_x = int(global_ls_x)
                             best_ls_y = int(global_ls_y * (480 / 640))
                             best_rs_x = int(global_rs_x)
