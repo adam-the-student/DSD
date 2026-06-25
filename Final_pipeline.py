@@ -21,6 +21,9 @@ import libcamera
 from libcamera import Transform
 import queue
 
+# Import native Hailo platform tools aligned with your data collector sandbox
+from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
+
 # Import utility layers
 from telemetry import log_system_telemetry, get_daily_csv_path, initialize_universal_logger
 from privacy import save_anonymized_and_encrypted_frame
@@ -122,7 +125,8 @@ CONFIDENCE_THRESHOLD = 60
 
 # --- CALIBRATION SETTINGS ---
 REAL_SHOULDER_WIDTH_INCHES = 17.0
-FOCAL_LENGTH_FACTOR = 1600  
+FOCAL_LENGTH_FACTOR = 318  # Aligned with your wide sensor profile calibration
+Offset = -60
 
 MIN_DISTANCE_FEET = 1    
 MAX_DISTANCE_FEET = 20  
@@ -170,7 +174,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     if metric_name == "wearer_departure_summary":
                         if "Decision:" in raw_val:
-                            # Extract profile label securely without assuming folder names
                             parsed_decision = raw_val.split("Decision:")[-1].split("|")[0].strip()
                             
                             if "UNKNOWN" in raw_val:
@@ -223,58 +226,138 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         connected_clients.remove(websocket)
 
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
+
 def run_vision_pipeline():
     global telemetry_data, picam, ALLOW_GUI_DISPLAY, last_harvest_time
     
     tracker = BadgeTrackerStateMachine()
     
-    print("Initializing Stage 1 Pose Joint Tracker via NPU...")
-    stage1_detector = YOLO("yolov8n-pose")
+    # --- STAGE 1: NATIVE NPU SETUP ---
+    model_path = "models/yolov8s-pose-h10.hef"
+    print(f"Loading hardware network: {model_path} onto AI HAT+...")
 
-    print("Initializing Stage 2 Custom Model Zoo Classifier...")
+    vdevice_params = VDevice.create_params()
+    vdevice_params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+
+    target_device = VDevice(vdevice_params)
+    infer_model = target_device.create_infer_model(model_path)
+
+    infer_model.input().set_format_type(FormatType.UINT8)
+    for output_name in infer_model.output_names:
+        infer_model.output(output_name).set_format_type(FormatType.FLOAT32)
+
+    input_name = infer_model.input_names[0]
+
+    # Map out your sandbox multi-scale layers and pixel downsampling strides
+    layer_pairs = [
+        {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  # 20x20
+        {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  # 40x40
+        {"score": "yolov8s_pose/conv44", "keypoint": "yolov8s_pose/conv45", "stride": 8}    # 80x80
+    ]
+
+    # --- STAGE 2: CPU CLASSIFIER SETUP ---
+    print("Initializing Stage 2 Custom Model Zoo Classifier via CPU...")
     stage2_classifier = YOLO("models/dosClassifier.pt")
 
     print("\n🚀 Starting Calibrated Distance Two-Stage Pipeline Background Engine.")
 
-    while True:
-        try:
-            raw_frame = picam.capture_array()
-            frame = cv2.resize(raw_frame, (640, 480))
-            frame = np.ascontiguousarray(frame)
-        except Exception as e:
-            print(f"Frame capture interruption: {e}")
-            time.sleep(0.1)
-            continue
-
-        detector_results = stage1_detector(frame, verbose=False, imgsz=640)
+    # Configure the hardware execution wrapper context
+    with infer_model.configure() as configured_infer_model:
+        bindings = configured_infer_model.create_bindings()
         
-        person_in_frame = False
-        crop_x1, crop_y1, crop_x2, crop_y2 = 0, 0, 0, 0
-        cropped_chest_frame = None
-        distance_status = "SEARCHING"
-        estimated_ft = 0.0
-        local_badge_status = "SCANNING..."
+        # Pre-allocate output memory buffers matching your sandbox test file
+        output_buffers = {}
+        for name in infer_model.output_names:
+            output_buffers[name] = np.empty(infer_model.output(name).shape, dtype=np.float32)
+            bindings.output(name).set_buffer(output_buffers[name])
         
-        # Dictionary container to hold dynamic classes and scores without hardcoding
-        active_probabilities = {}
-        top_confidence = 0
-        predicted_folder_name = "UNKNOWN"
+        while True:
+            try:
+                raw_frame = picam.capture_array()
+                frame = cv2.resize(raw_frame, (640, 480))
+                frame = np.ascontiguousarray(frame)
+            except Exception as e:
+                print(f"Frame capture interruption: {e}")
+                time.sleep(0.1)
+                continue
 
-        for result in detector_results:
-            if result.keypoints is not None and len(result.keypoints.xy) > 0:
-                kpts = result.keypoints.xy[0]
-                left_shoulder = kpts[5]
-                right_shoulder = kpts[6]
+            # FIX: Clean up color conversion from RGB to BGR to fix the blue tint bug
+            if frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            else:
+                # If it's already 3 channels, Picamera2 naturally defaults to BGR, 
+                # so we can just ensure it's contiguous without changing the colors
+                frame = np.ascontiguousarray(frame)
                 
-                if left_shoulder[0] > 0 and right_shoulder[0] > 0:
+            clean_frame = frame.copy()
+
+            # Square padding allocation matching the NPU configuration mapping profiles
+            hailo_input_frame = cv2.resize(frame, (640, 640))
+            input_array = np.expand_dims(hailo_input_frame, axis=0).astype(np.uint8)
+            bindings.input(input_name).set_buffer(input_array)
+            
+            # Fire accelerated execution pass on NPU
+            configured_infer_model.run([bindings], timeout=1000)
+            
+            person_in_frame = False
+            crop_x1, crop_y1, crop_x2, crop_y2 = 0, 0, 0, 0
+            cropped_chest_frame = None
+            distance_status = "SEARCHING"
+            estimated_ft = 0.0
+            local_badge_status = "SCANNING..."
+            
+            active_probabilities = {}
+            top_confidence = 0
+            predicted_folder_name = "UNKNOWN"
+
+            best_score = -999.0
+            best_ls_x, best_ls_y = 0, 0
+            best_rs_x, best_rs_y = 0, 0
+
+            # FIX: Implement your multi-scale grid decoding loop to parse shoulders out of feature maps
+            try:
+                for pair in layer_pairs:
+                    score_tensor = output_buffers[pair["score"]]      
+                    keypoint_tensor = output_buffers[pair["keypoint"]]  
+                    stride = pair["stride"]
+                    
+                    H, W, _ = score_tensor.shape
+                    
+                    for h in range(H):
+                        for w in range(W):
+                            raw_score = score_tensor[h, w, 0]
+                            
+                            if raw_score > best_score:
+                                kp_data = keypoint_tensor[h, w]
+                                
+                                ls_x_offset = kp_data[15]
+                                ls_y_offset = kp_data[16]
+                                rs_x_offset = kp_data[18]
+                                rs_y_offset = kp_data[19]
+                                
+                                global_ls_x = ((ls_x_offset * 2.0) + w) * stride
+                                global_ls_y = ((ls_y_offset * 2.0) + h) * stride
+                                global_rs_x = ((rs_x_offset * 2.0) + w) * stride
+                                global_rs_y = ((rs_y_offset * 2.0) + h) * stride
+                                
+                                best_score = raw_score
+                                
+                                best_ls_x = int(global_ls_x)
+                                best_ls_y = int(global_ls_y * (480 / 640))
+                                best_rs_x = int(global_rs_x)
+                                best_rs_y = int(global_rs_y * (480 / 640))
+
+                final_conf = sigmoid(best_score)
+
+                # Process tracking values if the decoded shoulder confidence is solid
+                if final_conf > 0.35 and best_ls_x > 0 and best_rs_x > 0:
                     person_in_frame = True
-                    ls_x, ls_y = int(left_shoulder[0]), int(left_shoulder[1])
-                    rs_x, rs_y = int(right_shoulder[0]), int(right_shoulder[1])
+                    pixel_width = np.sqrt((best_ls_x - best_rs_x)**2 + (best_ls_y - best_rs_y)**2)
                     
-                    shoulder_width_pixels = abs(ls_x - rs_x)
-                    
-                    if shoulder_width_pixels > 0:
-                        distance_inches = (REAL_SHOULDER_WIDTH_INCHES * FOCAL_LENGTH_FACTOR) / shoulder_width_pixels
+                    if pixel_width > 0:
+                        distance_inches = (REAL_SHOULDER_WIDTH_INCHES * FOCAL_LENGTH_FACTOR) / pixel_width
                         estimated_ft = round(distance_inches / 12.0, 1)
                     
                     if estimated_ft > MAX_DISTANCE_FEET:
@@ -284,127 +367,126 @@ def run_vision_pipeline():
                     else:
                         distance_status = "OK"
 
-                    crop_x1 = min(ls_x, rs_x) + int(shoulder_width_pixels * 0.20)
-                    crop_x2 = max(ls_x, rs_x) - int(shoulder_width_pixels * 0.20)
-                    crop_y1 = min(ls_y, rs_y) - int(shoulder_width_pixels * 0.25)
-                    crop_y2 = min(ls_y, rs_y) + int(shoulder_width_pixels * 0.45)
+                    # Construct tracking crop boundaries around the center chest zone
+                    box_width = int(pixel_width * 0.65)
+                    box_height = box_width  
+                    
+                    shoulder_center_x = min(best_ls_x, best_rs_x) + (abs(best_ls_x - best_rs_x) // 2)
+                    crop_x1 = shoulder_center_x - (box_width // 2)
+                    crop_x2 = crop_x1 + box_width
+                    
+                    crop_y1 = min(best_ls_y, best_rs_y) + Offset
+                    crop_y2 = crop_y1 + box_height
                     
                     crop_x1, crop_y1 = max(0, crop_x1), max(0, crop_y1)
                     crop_x2, crop_y2 = min(frame.shape[1], crop_x2), min(frame.shape[0], crop_y2)
                     
                     if crop_x2 > crop_x1 and crop_y2 > crop_y1:
-                        cropped_chest_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-                    break
+                        cropped_chest_frame = clean_frame[crop_y1:crop_y2, crop_x1:crop_x2]
+            except Exception as parse_err:
+                pass
 
-        has_departed = tracker.update_presence(person_in_frame)
-        if has_departed:
-            tracker.trigger_departure_event(frame, detector_results)
+            # Maintain tracking system and evaluation transitions
+            has_departed = tracker.update_presence(person_in_frame)
+            if has_departed:
+                tracker.trigger_departure_event(frame, None)
 
-        if tracker.state == "LOCKED":
-            local_badge_status = tracker.current_user_final_decision
-        
-        # 1. INDEPENDENT RANDOM HARVESTER 
-        if distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
-            if random.random() < RANDOM_HARVEST_PROBABILITY:
-                identified_as_tech = False 
-                enc_file = save_anonymized_and_encrypted_frame(
-                    cropped_chest_frame, detector_results, prefix="rand", 
-                    crop_offsets=(crop_x1, crop_y1), is_rad_tech=identified_as_tech
-                )
-                if enc_file:
-                    log_system_telemetry("random_harvest", f"Saved baseline frame: {enc_file}", "INFO")
-
-        # 2. FULLY DYNAMIC DECODER BLOCK (NO HARDCODED STRINGS)
-        if tracker.state != "LOCKED" and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
-            resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
-            classifier_results = stage2_classifier(resized_crop, verbose=False, imgsz=224)
+            if tracker.state == "LOCKED":
+                local_badge_status = tracker.current_user_final_decision
             
-            # Pull dataset mappings and values dynamically directly from model properties
-            class_mapping = classifier_results[0].names  
-            probs_tensor = classifier_results[0].probs.data.cpu().numpy()
-            
-            # Automatically populate all outputs into a dictionary container
-            for idx, class_name in class_mapping.items():
-                active_probabilities[class_name.upper()] = int(probs_tensor[idx] * 100)
-
-            top_prediction_id = classifier_results[0].probs.top1
-            predicted_folder_name = class_mapping[top_prediction_id].upper()
-            top_confidence = int(classifier_results[0].probs.top1conf.item() * 100)
-
-            # Assign status using the folder name dynamically
-            if top_confidence >= CONFIDENCE_THRESHOLD:
-                local_badge_status = f"{predicted_folder_name} DETECTED"
-            else:
-                local_badge_status = "CALCULATING..."
-                current_time = time.time()
-                if top_confidence >= 40 and (current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS):
-                    identified_as_tech = False
+            if distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
+                if random.random() < RANDOM_HARVEST_PROBABILITY:
+                    identified_as_tech = False 
                     enc_file = save_anonymized_and_encrypted_frame(
-                        cropped_chest_frame, detector_results, prefix="edge", 
-                        extra_suffix=str(top_confidence), crop_offsets=(crop_x1, crop_y1),
-                        is_rad_tech=identified_as_tech
+                        cropped_chest_frame, None, prefix="rand", 
+                        crop_offsets=(crop_x1, crop_y1), is_rad_tech=identified_as_tech
                     )
                     if enc_file:
-                        last_harvest_time = current_time
-                        log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
+                        log_system_telemetry("random_harvest", f"Saved baseline frame: {enc_file}", "INFO")
+
+            if tracker.state != "LOCKED" and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
+                resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
+                classifier_results = stage2_classifier(resized_crop, verbose=False, imgsz=224)
+                
+                class_mapping = classifier_results[0].names  
+                probs_tensor = classifier_results[0].probs.data.cpu().numpy()
+                
+                for idx, class_name in class_mapping.items():
+                    active_probabilities[class_name.upper()] = int(probs_tensor[idx] * 100)
+
+                top_prediction_id = classifier_results[0].probs.top1
+                predicted_folder_name = class_mapping[top_prediction_id].upper()
+                top_confidence = int(classifier_results[0].probs.top1conf.item() * 100)
+
+                if top_confidence >= CONFIDENCE_THRESHOLD:
+                    local_badge_status = f"{predicted_folder_name} DETECTED"
+                else:
+                    local_badge_status = "CALCULATING..."
+                    current_time = time.time()
+                    if top_confidence >= 40 and (current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS):
+                        identified_as_tech = False
+                        enc_file = save_anonymized_and_encrypted_frame(
+                            cropped_chest_frame, None, prefix="edge", 
+                            extra_suffix=str(top_confidence), crop_offsets=(crop_x1, crop_y1),
+                            is_rad_tech=identified_as_tech
+                        )
+                        if enc_file:
+                            last_harvest_time = current_time
+                            log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
+                
+                if local_badge_status != "CALCULATING...":
+                    tracker.update_evaluation(local_badge_status, top_confidence)
+
+            has_active_event = telemetry_data.get("is_entry_event", False)
+            evt_time = telemetry_data.get("time", None)
+            evt_prof = telemetry_data.get("profile", None)
+            evt_conf = telemetry_data.get("confidence", None)
+            evt_prox = telemetry_data.get("proximity", None)
+
+            score_readouts = " | ".join([f"{k}: {v}%" for k, v in active_probabilities.items()])
+            HUD_badge_string = f"{local_badge_status} ({score_readouts})" if tracker.state != "IDLE" else "SCANNING..."
             
-            if local_badge_status != "CALCULATING...":
-                tracker.update_evaluation(local_badge_status, top_confidence)
-
-        has_active_event = telemetry_data.get("is_entry_event", False)
-        
-        evt_time = telemetry_data.get("time", None)
-        evt_prof = telemetry_data.get("profile", None)
-        evt_conf = telemetry_data.get("confidence", None)
-        evt_prox = telemetry_data.get("proximity", None)
-
-        # Build dynamic HUD score readouts loop securely
-        score_readouts = " | ".join([f"{k}: {v}%" for k, v in active_probabilities.items()])
-        HUD_badge_string = f"{local_badge_status} ({score_readouts})" if tracker.state != "IDLE" else "SCANNING..."
-        
-        telemetry_data.update({
-            "badge_status": HUD_badge_string,
-            "distance_status": distance_status,
-            "estimated_ft": estimated_ft if person_in_frame else 0.0,
-            "is_entry_event": has_active_event
-        })
-        
-        if has_active_event:
-            telemetry_data["time"] = evt_time
-            telemetry_data["profile"] = evt_prof
-            telemetry_data["confidence"] = evt_conf
-            telemetry_data["proximity"] = evt_prox
-
-        # --- ONSCREEN RENDERING OVERLAYS ---
-        if crop_x2 > 0 and crop_y2 > 0 and ALLOW_GUI_DISPLAY:  
-            # Select bounding box boundaries colors dynamically
-            box_color = (0, 255, 0) if "NO" not in local_badge_status and "DETECTED" in local_badge_status else (0, 0, 255)
-            if distance_status != "OK" or "CALCULATING" in local_badge_status:
-                box_color = (0, 165, 255)
-
-            cv2.rectangle(frame, (crop_x1, crop_y1), (crop_x2, crop_y2), box_color, 2)
-            cv2.circle(frame, (ls_x, ls_y), 5, (255, 0, 0), 2)
-            cv2.circle(frame, (rs_x, rs_y), 5, (255, 0, 0), 2)
+            telemetry_data.update({
+                "badge_status": HUD_badge_string,
+                "distance_status": distance_status,
+                "estimated_ft": estimated_ft if person_in_frame else 0.0,
+                "is_entry_event": has_active_event
+            })
             
-            # Dynamic line renderings
-            text_line1 = f"STATUS: {local_badge_status}"
-            text_line2 = score_readouts
-            text_line3 = f"PROXIMITY: {estimated_ft} ft"
-            
-            cv2.putText(frame, text_line1, (crop_x1, crop_y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2, cv2.LINE_AA)
-            cv2.putText(frame, text_line2, (crop_x1, crop_y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(frame, text_line3, (crop_x1, crop_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
+            if has_active_event:
+                telemetry_data["time"] = evt_time
+                telemetry_data["profile"] = evt_prof
+                telemetry_data["confidence"] = evt_conf
+                telemetry_data["proximity"] = evt_prox
 
-        if ALLOW_GUI_DISPLAY:
-            try:
-                cv2.imshow("Main Camera View", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-            except cv2.error:
-                print("\n🖥️ Headless mode active. Disabling GUI display canvas windows.")
-                ALLOW_GUI_DISPLAY = False
-        else:
-            time.sleep(0.001)
+            # --- ONSCREEN RENDERING OVERLAYS ---
+            if person_in_frame and ALLOW_GUI_DISPLAY:  
+                box_color = (0, 255, 0) if "NO" not in local_badge_status and "DETECTED" in local_badge_status else (0, 0, 255)
+                if distance_status != "OK" or "CALCULATING" in local_badge_status:
+                    box_color = (0, 165, 255)
+
+                cv2.rectangle(frame, (crop_x1, crop_y1), (crop_x2, crop_y2), box_color, 2)
+                cv2.circle(frame, (best_ls_x, best_ls_y), 5, (0, 255, 0), -1)
+                cv2.circle(frame, (best_rs_x, best_rs_y), 5, (0, 255, 0), -1)
+                
+                text_line1 = f"STATUS: {local_badge_status}"
+                text_line2 = score_readouts
+                text_line3 = f"PROXIMITY: {estimated_ft} ft"
+                
+                cv2.putText(frame, text_line1, (crop_x1, crop_y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2, cv2.LINE_AA)
+                cv2.putText(frame, text_line2, (crop_x1, crop_y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, text_line3, (crop_x1, crop_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
+
+            if ALLOW_GUI_DISPLAY:
+                try:
+                    cv2.imshow("Main Camera View", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                except cv2.error:
+                    print("\n🖥️ Headless mode active. Disabling GUI display canvas windows.")
+                    ALLOW_GUI_DISPLAY = False
+            else:
+                time.sleep(0.001)
 
     try:
         cv2.destroyAllWindows()
