@@ -1,8 +1,8 @@
 import os
 import sys
-IS_SSH_SESSION = "SSH_CLIENT" in os.environ or "SSH_TTY" in os.environ
+I_SSH_SESSION = "SSH_CLIENT" in os.environ or "SSH_TTY" in os.environ
 
-if IS_SSH_SESSION:
+if I_SSH_SESSION:
     os.environ["OPENCV_HEADLESS"] = "1"
 import csv
 import cv2
@@ -24,9 +24,10 @@ import queue
 # Import native Hailo platform tools aligned with your data collector sandbox
 from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
 
-# Import utility layers
+# Import custom helper classes
 from telemetry import log_system_telemetry, get_daily_csv_path, initialize_universal_logger
 from privacy import save_anonymized_and_encrypted_frame
+from tamagotchi import TamagotchiEngine
 
 # Initialize dynamic telemetry columns on startup
 initialize_universal_logger()
@@ -35,7 +36,7 @@ initialize_universal_logger()
 vision_pipeline_active = True  
 vision_thread = None           
 picam = None                   
-ALLOW_GUI_DISPLAY = not IS_SSH_SESSION  
+ALLOW_GUI_DISPLAY = not I_SSH_SESSION  
 
 # --- RANDOM SAMPLING CONFIGURATION ---
 RANDOM_HARVEST_PROBABILITY = 0.01
@@ -72,8 +73,8 @@ class BadgeTrackerStateMachine:
                     return True # Signifies departure needs processing
         return False
 
-    def update_evaluation(self, decision: str, confidence: int):
-        """Updates internal memory metrics with the highest confidence predictions."""
+    def update_evaluation(self, decision: str, confidence: int, pet_engine_reference):
+        """Updates internal memory metrics and logs compliance tracking feed metrics."""
         if self.state in ["TRACKING", "EVALUATING"]:
             self.state = "EVALUATING"
             
@@ -81,9 +82,13 @@ class BadgeTrackerStateMachine:
                 self.current_user_max_confidence = confidence
                 self.current_user_final_decision = decision
 
-            if confidence >= 85:
+            if confidence >= 69 and self.state != "LOCKED":
                 self.state = "LOCKED"
                 print(f"🔒 State LOCKED: {decision} confirmed at {confidence}%.")
+                
+                # --- STEP C: Check technician compliance and feed the cat ---
+                if "NO" not in decision.upper() and decision != "UNKNOWN":
+                    pet_engine_reference.register_successful_feeding()
 
     def trigger_departure_event(self, frame, detector_results):
         """Logs interaction events quietly and drops the payload into the cross-thread queue."""
@@ -123,6 +128,7 @@ class BadgeTrackerStateMachine:
 CLASSIFIER_IMG_SIZE = (224, 224)  
 CONFIDENCE_THRESHOLD = 60  
 
+
 # --- CALIBRATION SETTINGS ---
 REAL_SHOULDER_WIDTH_INCHES = 17.0
 FOCAL_LENGTH_FACTOR = 318  # Aligned with your wide sensor profile calibration
@@ -135,7 +141,10 @@ telemetry_data = {
     "badge_status": "INITIALIZING...",
     "distance_status": "SEARCHING",
     "estimated_ft": 0.0,
-    "is_entry_event": False
+    "is_entry_event": False,
+    "pet_status": "UNKNOWN",
+    "successful_feedings": 0,
+    "daily_goal": 5
 }
 
 connected_clients = set()
@@ -147,6 +156,11 @@ app.mount("/static", StaticFiles(directory="web"), name="static")
 @app.get("/")
 async def get_dashboard():
     return FileResponse("web/Index.html")
+
+# Standalone page channel for your secondary Tamagotchi view
+@app.get("/cat")
+async def get_cat_dashboard():
+    return FileResponse("web/Cat.html")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -233,7 +247,8 @@ def run_vision_pipeline():
     global telemetry_data, picam, ALLOW_GUI_DISPLAY, last_harvest_time
     
     tracker = BadgeTrackerStateMachine()
-    
+    pet = TamagotchiEngine(daily_goal=5)
+
     # --- STAGE 1: NATIVE NPU SETUP ---
     model_path = "models/yolov8s-pose-h10.hef"
     print(f"Loading hardware network: {model_path} onto AI HAT+...")
@@ -283,12 +298,10 @@ def run_vision_pipeline():
                 time.sleep(0.1)
                 continue
 
-            # FIX: Clean up color conversion from RGB to BGR to fix the blue tint bug
+            # Clean up color conversion from RGB to BGR to fix the blue tint bug
             if frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
             else:
-                # If it's already 3 channels, Picamera2 naturally defaults to BGR, 
-                # so we can just ensure it's contiguous without changing the colors
                 frame = np.ascontiguousarray(frame)
                 
             clean_frame = frame.copy()
@@ -316,7 +329,7 @@ def run_vision_pipeline():
             best_ls_x, best_ls_y = 0, 0
             best_rs_x, best_rs_y = 0, 0
 
-            # FIX: Implement your multi-scale grid decoding loop to parse shoulders out of feature maps
+            # Implement multi-scale grid decoding loop to parse shoulders out of feature maps
             try:
                 for pair in layer_pairs:
                     score_tensor = output_buffers[pair["score"]]      
@@ -351,8 +364,8 @@ def run_vision_pipeline():
 
                 final_conf = sigmoid(best_score)
 
-                # Process tracking values if the decoded shoulder confidence is solid
-                if final_conf > 0.35 and best_ls_x > 0 and best_rs_x > 0:
+                # ADJUSTABLE FILTER GATE: Filters out false static background textures
+                if final_conf > 0.68 and best_ls_x > 0 and best_rs_x > 0:
                     person_in_frame = True
                     pixel_width = np.sqrt((best_ls_x - best_rs_x)**2 + (best_ls_y - best_rs_y)**2)
                     
@@ -383,10 +396,12 @@ def run_vision_pipeline():
                     
                     if crop_x2 > crop_x1 and crop_y2 > crop_y1:
                         cropped_chest_frame = clean_frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                else:
+                    person_in_frame = False
             except Exception as parse_err:
-                pass
+                person_in_frame = False
 
-            # Maintain tracking system and evaluation transitions
+            # --- CALL EVERY FRAME INDEPENDENTLY ---
             has_departed = tracker.update_presence(person_in_frame)
             if has_departed:
                 tracker.trigger_departure_event(frame, None)
@@ -435,7 +450,8 @@ def run_vision_pipeline():
                             log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
                 
                 if local_badge_status != "CALCULATING...":
-                    tracker.update_evaluation(local_badge_status, top_confidence)
+                    # --- STEP C: Pass pet instance down into evaluation router ---
+                    tracker.update_evaluation(local_badge_status, top_confidence, pet)
 
             has_active_event = telemetry_data.get("is_entry_event", False)
             evt_time = telemetry_data.get("time", None)
@@ -446,11 +462,17 @@ def run_vision_pipeline():
             score_readouts = " | ".join([f"{k}: {v}%" for k, v in active_probabilities.items()])
             HUD_badge_string = f"{local_badge_status} ({score_readouts})" if tracker.state != "IDLE" else "SCANNING..."
             
+            # Pack telemetry fields without breaking the default dashboard page mappings
             telemetry_data.update({
                 "badge_status": HUD_badge_string,
                 "distance_status": distance_status,
                 "estimated_ft": estimated_ft if person_in_frame else 0.0,
-                "is_entry_event": has_active_event
+                "is_entry_event": has_active_event,
+                
+                # Appended extra keys that your standalone Cat page can extract natively
+                "pet_status": pet.get_status(),
+                "successful_feedings": pet.successful_feedings,
+                "daily_goal": pet.DAILY_GOAL
             })
             
             if has_active_event:
@@ -460,24 +482,28 @@ def run_vision_pipeline():
                 telemetry_data["proximity"] = evt_prox
 
             # --- ONSCREEN RENDERING OVERLAYS ---
-            if person_in_frame and ALLOW_GUI_DISPLAY:  
-                box_color = (0, 255, 0) if "NO" not in local_badge_status and "DETECTED" in local_badge_status else (0, 0, 255)
-                if distance_status != "OK" or "CALCULATING" in local_badge_status:
-                    box_color = (0, 165, 255)
-
-                cv2.rectangle(frame, (crop_x1, crop_y1), (crop_x2, crop_y2), box_color, 2)
-                cv2.circle(frame, (best_ls_x, best_ls_y), 5, (0, 255, 0), -1)
-                cv2.circle(frame, (best_rs_x, best_rs_y), 5, (0, 255, 0), -1)
+            if ALLOW_GUI_DISPLAY:  
+                # Print live Stage 1 NPU anchor evaluation metrics to catch false background shapes
+                conf_text = f"NPU Conf: {int(final_conf * 100)}%"
+                cv2.putText(frame, conf_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
                 
-                text_line1 = f"STATUS: {local_badge_status}"
-                text_line2 = score_readouts
-                text_line3 = f"PROXIMITY: {estimated_ft} ft"
-                
-                cv2.putText(frame, text_line1, (crop_x1, crop_y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2, cv2.LINE_AA)
-                cv2.putText(frame, text_line2, (crop_x1, crop_y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(frame, text_line3, (crop_x1, crop_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
+                if person_in_frame:
+                    box_color = (0, 255, 0) if "NO" not in local_badge_status and "DETECTED" in local_badge_status else (0, 0, 255)
+                    if distance_status != "OK" or "CALCULATING" in local_badge_status:
+                        box_color = (0, 165, 255)
 
-            if ALLOW_GUI_DISPLAY:
+                    cv2.rectangle(frame, (crop_x1, crop_y1), (crop_x2, crop_y2), box_color, 2)
+                    cv2.circle(frame, (best_ls_x, best_ls_y), 5, (0, 255, 0), -1)
+                    cv2.circle(frame, (best_rs_x, best_rs_y), 5, (0, 255, 0), -1)
+                    
+                    text_line1 = f"STATUS: {local_badge_status}"
+                    text_line2 = score_readouts
+                    text_line3 = f"PROXIMITY: {estimated_ft} ft"
+                    
+                    cv2.putText(frame, text_line1, (crop_x1, crop_y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2, cv2.LINE_AA)
+                    cv2.putText(frame, text_line2, (crop_x1, crop_y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame, text_line3, (crop_x1, crop_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
+
                 try:
                     cv2.imshow("Main Camera View", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
