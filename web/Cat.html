@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Tamagotchi Cat Vitals</title>
+</head>
+<body>
+
+    <h1>MONITOR</h1>
+    <hr>
+
+    <h2>Readout:</h2>
+    <ul>
+        <li><strong>Pet Status:</strong> <span id="pet_status">LOADING...</span></li>
+        <li><strong>Successful Feedings today:</strong> <span id="successful_feedings">0</span></li>
+        <li><strong>Daily Baseline Goal:</strong> <span id="daily_goal">0</span></li>
+    </ul>
+
+    <hr>
+    <h3>System Debug Connection State: <span id="ws_status">Disconnected</span></h3>
+
+    <script>
+        // Connect to the existing master pipeline WebSocket stream
+        const socket = new WebSocket(`ws://${window.location.host}/ws`);
+
+        socket.onopen = function(e) {
+            document.getElementById('ws_status').innerText = "Connected";
+            document.getElementById('ws_status').style.color = "green";
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+
+            // Ignore startup history payloads and entry event alerts
+            if (data.is_startup_history || data.is_entry_event) {
+                return;
+            }
+
+            // Extract and update the specific raw pet metrics from the snapshot dictionary
+            if (data.pet_status !== undefined) {
+                document.getElementById('pet_status').innerText = data.pet_status;
+            }
+            if (data.successful_feedings !== undefined) {
+                document.getElementById('successful_feedings').innerText = data.successful_feedings;
+            }
+            if (data.daily_goal !== undefined) {
+                document.getElementById('daily_goal').innerText = data.daily_goal;
+            }
+        };
+
+        socket.onclose = function(e) {
+            document.getElementById('ws_status').innerText = "Disconnected / Pipeline Offline";
+            document.getElementById('ws_status').style.color = "red";
+        };
+
+        socket.onerror = function(error) {
+            console.error(`WebSocket Error: ${error.message}`);
+        };
+    </script>
+</body>
+</html>

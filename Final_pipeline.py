@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import time
+import json
 import random
 from picamera2 import Picamera2
 import libcamera
@@ -48,6 +49,7 @@ HARVEST_COOLDOWN_SECONDS = 5.0
 # --- GLOBAL ASYNC EVENT BRIDGE ---
 main_event_loop = None
 event_queue = queue.Queue()
+pet = None  # Global anchor reference shared with network threads
 
 # --- TRACKING STATE MACHINE LAYER ---
 class BadgeTrackerStateMachine:
@@ -82,7 +84,8 @@ class BadgeTrackerStateMachine:
                 self.current_user_max_confidence = confidence
                 self.current_user_final_decision = decision
 
-            if confidence >= 69 and self.state != "LOCKED":
+            # LOWERED GATE: Set to 60 to register locks cleanly alongside HUD reads
+            if confidence >= 60 and self.state != "LOCKED":
                 self.state = "LOCKED"
                 print(f"🔒 State LOCKED: {decision} confirmed at {confidence}%.")
                 
@@ -92,7 +95,7 @@ class BadgeTrackerStateMachine:
 
     def trigger_departure_event(self, frame, detector_results):
         """Logs interaction events quietly and drops the payload into the cross-thread queue."""
-        global event_queue
+        global event_queue, pet, telemetry_data, connected_clients, main_event_loop
         from datetime import datetime
 
         # Dynamic profile parsing for the log string file layout
@@ -118,6 +121,25 @@ class BadgeTrackerStateMachine:
                     
         print(f"🚶 Person departed. Summary logged: {profile_string}")
         
+        # Reset unique transaction lock so the next person can log a feeding
+        if pet is not None:
+            pet.reset_user()
+            telemetry_data["daily_goal"] = pet.DAILY_GOAL
+            telemetry_data["successful_feedings"] = pet.successful_feedings
+            telemetry_data["pet_status"] = pet.get_status()
+            
+            # 🟢 SNAPPY BROADCAST GATES: Push live changes to connected web clients instantly!
+            if main_event_loop is not None and connected_clients:
+                broadcast_payload = dict(telemetry_data)
+                for client in list(connected_clients):
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            client.send_json(broadcast_payload), 
+                            main_event_loop
+                        )
+                    except Exception:
+                        pass
+
         # Reset State Engine
         self.state = "IDLE"
         self.current_user_max_confidence = 0
@@ -127,7 +149,6 @@ class BadgeTrackerStateMachine:
 # --- CONFIGURATION TUNING CORNER ---
 CLASSIFIER_IMG_SIZE = (224, 224)  
 CONFIDENCE_THRESHOLD = 60  
-
 
 # --- CALIBRATION SETTINGS ---
 REAL_SHOULDER_WIDTH_INCHES = 17.0
@@ -157,14 +178,13 @@ app.mount("/static", StaticFiles(directory="web"), name="static")
 async def get_dashboard():
     return FileResponse("web/Index.html")
 
-# Standalone page channel for your secondary Tamagotchi view
 @app.get("/cat")
 async def get_cat_dashboard():
     return FileResponse("web/Cat.html")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global main_event_loop, telemetry_data
+    global main_event_loop, telemetry_data, pet
     await websocket.accept()
     connected_clients.add(websocket)
     
@@ -189,11 +209,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if metric_name == "wearer_departure_summary":
                         if "Decision:" in raw_val:
                             parsed_decision = raw_val.split("Decision:")[-1].split("|")[0].strip()
-                            
-                            if "UNKNOWN" in raw_val:
-                                profile_label = "❌ Unknown Status"
-                            else:
-                                profile_label = parsed_decision.title()
+                            profile_label = "❌ Unknown Status" if "UNKNOWN" in raw_val else parsed_decision.title()
                             
                             conf = "N/A"
                             if "Max Conf:" in raw_val:
@@ -209,45 +225,89 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "confidence": conf,
                                 "proximity": "3.5 ft"
                             })
-        except Exception as e:
+        except Exception:
             pass
 
     if startup_history:
-        await websocket.send_json({
-            "is_startup_history": True,
-            "history": startup_history
-        })
+        try:
+            await websocket.send_json({
+                "is_startup_history": True,
+                "history": startup_history
+            })
+        except Exception:
+            connected_clients.discard(websocket)
+            return
 
     try:
         while True:
             global event_queue
             
+            # 1. INDEPENDENT INCOMING MANAGER STREAM READER
+            try:
+                raw_incoming = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
+                if raw_incoming:
+                    parsed_incoming = json.loads(raw_incoming)
+                    if "set_daily_goal" in parsed_incoming:
+                        new_target = int(parsed_incoming["set_daily_goal"])
+                        
+                        # Apply to master telemetry dict cache instantly
+                        telemetry_data["daily_goal"] = new_target
+                        
+                        if pet is not None:
+                            pet.DAILY_GOAL = new_target
+                            pet.save_state_to_disk()
+                        print(f"⚙️ MANAGER UPDATE: Daily target shifted to {new_target} and saved to disk.")
+            except asyncio.TimeoutError:
+                pass 
+            except (WebSocketDisconnect, RuntimeError):
+                raise 
+            except Exception as e:
+                print(f"⚠️ Internal manager parsing error: {e}")
+            
+            # 2. DRAIN LIVE DEPARTURE EVENT QUEUE SAFELY
             try:
                 while not event_queue.empty():
                     live_alert = event_queue.get_nowait()
-                    await websocket.send_json(live_alert)
+                    try:
+                        await websocket.send_json(live_alert)
+                    except (RuntimeError, Exception):
+                        # Catch closed transport paths without killing the server process
+                        pass
                     event_queue.task_done()
                     await asyncio.sleep(0.01)
             except queue.Empty:
                 pass
             
-            current_snapshot = dict(telemetry_data)
-            await websocket.send_json(current_snapshot)
-                
+            # 3. TRANSMIT STEADY OPERATIONAL TELEMETRY SNAPSHOTS
+            # Pull directly from our state engine instance variables
+            if pet is not None:
+                telemetry_data["daily_goal"] = pet.DAILY_GOAL
+                telemetry_data["successful_feedings"] = pet.successful_feedings
+                telemetry_data["pet_status"] = pet.get_status()
+
+            await websocket.send_json(dict(telemetry_data))
             await asyncio.sleep(0.05)
-    except WebSocketDisconnect:
+            
+    except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        connected_clients.remove(websocket)
+        connected_clients.discard(websocket)
 
 def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
 
 def run_vision_pipeline():
-    global telemetry_data, picam, ALLOW_GUI_DISPLAY, last_harvest_time
+    global telemetry_data, picam, ALLOW_GUI_DISPLAY, last_harvest_time, pet
     
     tracker = BadgeTrackerStateMachine()
     pet = TamagotchiEngine(daily_goal=5)
+    
+    fps_frame_timestamps = []
+    current_calculated_fps = 0.0
+
+    # Track calendar date string on loop entry to sync with daily logs
+    current_cycle_day = time.strftime('%Y-%m-%d')
+    telemetry_data["daily_goal"] = pet.DAILY_GOAL
 
     # --- STAGE 1: NATIVE NPU SETUP ---
     model_path = "models/yolov8s-pose-h10.hef"
@@ -265,7 +325,7 @@ def run_vision_pipeline():
 
     input_name = infer_model.input_names[0]
 
-    # Map out your sandbox multi-scale layers and pixel downsampling strides
+    # Map out sandbox multi-scale layers and pixel downsampling strides
     layer_pairs = [
         {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  # 20x20
         {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  # 40x40
@@ -282,7 +342,7 @@ def run_vision_pipeline():
     with infer_model.configure() as configured_infer_model:
         bindings = configured_infer_model.create_bindings()
         
-        # Pre-allocate output memory buffers matching your sandbox test file
+        # Pre-allocate output memory buffers matching sandbox test specification
         output_buffers = {}
         for name in infer_model.output_names:
             output_buffers[name] = np.empty(infer_model.output(name).shape, dtype=np.float32)
@@ -290,6 +350,14 @@ def run_vision_pipeline():
         
         while True:
             try:
+                start_loop_time = time.time()
+                fps_frame_timestamps.append(start_loop_time)
+                if len(fps_frame_timestamps) > 30:
+                    fps_frame_timestamps.pop(0)
+                
+                if len(fps_frame_timestamps) > 1:
+                    total_duration = fps_frame_timestamps[-1] - fps_frame_timestamps[0]
+                    current_calculated_fps = round((len(fps_frame_timestamps) - 1) / total_duration, 1) if total_duration > 0 else 0.0
                 raw_frame = picam.capture_array()
                 frame = cv2.resize(raw_frame, (640, 480))
                 frame = np.ascontiguousarray(frame)
@@ -306,7 +374,7 @@ def run_vision_pipeline():
                 
             clean_frame = frame.copy()
 
-            # Square padding allocation matching the NPU configuration mapping profiles
+            # Square padding allocation matching NPU input configuration profiles
             hailo_input_frame = cv2.resize(frame, (640, 640))
             input_array = np.expand_dims(hailo_input_frame, axis=0).astype(np.uint8)
             bindings.input(input_name).set_buffer(input_array)
@@ -329,7 +397,7 @@ def run_vision_pipeline():
             best_ls_x, best_ls_y = 0, 0
             best_rs_x, best_rs_y = 0, 0
 
-            # Implement multi-scale grid decoding loop to parse shoulders out of feature maps
+            # Multi-scale grid decoding loop to parse shoulders out of feature maps
             try:
                 for pair in layer_pairs:
                     score_tensor = output_buffers[pair["score"]]      
@@ -364,8 +432,8 @@ def run_vision_pipeline():
 
                 final_conf = sigmoid(best_score)
 
-                # ADJUSTABLE FILTER GATE: Filters out false static background textures
-                if final_conf > 0.68 and best_ls_x > 0 and best_rs_x > 0:
+                # ADJUSTED CUSHION FILTER: Locked to 0.65 to enable reliable 70% target passes
+                if final_conf > 0.65 and best_ls_x > 0 and best_rs_x > 0:
                     person_in_frame = True
                     pixel_width = np.sqrt((best_ls_x - best_rs_x)**2 + (best_ls_y - best_rs_y)**2)
                     
@@ -380,7 +448,7 @@ def run_vision_pipeline():
                     else:
                         distance_status = "OK"
 
-                    # Construct tracking crop boundaries around the center chest zone
+                    # Construct tracking crop boundaries around center chest zone
                     box_width = int(pixel_width * 0.65)
                     box_height = box_width  
                     
@@ -450,7 +518,6 @@ def run_vision_pipeline():
                             log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
                 
                 if local_badge_status != "CALCULATING...":
-                    # --- STEP C: Pass pet instance down into evaluation router ---
                     tracker.update_evaluation(local_badge_status, top_confidence, pet)
 
             has_active_event = telemetry_data.get("is_entry_event", False)
@@ -462,14 +529,17 @@ def run_vision_pipeline():
             score_readouts = " | ".join([f"{k}: {v}%" for k, v in active_probabilities.items()])
             HUD_badge_string = f"{local_badge_status} ({score_readouts})" if tracker.state != "IDLE" else "SCANNING..."
             
-            # Pack telemetry fields without breaking the default dashboard page mappings
+            # Sync any potential dynamic adjustments back to engine object variables
+            pet.DAILY_GOAL = telemetry_data.get("daily_goal", 5)
+
+            # Pack telemetry fields without disrupting default dashboard layouts
             telemetry_data.update({
                 "badge_status": HUD_badge_string,
                 "distance_status": distance_status,
                 "estimated_ft": estimated_ft if person_in_frame else 0.0,
                 "is_entry_event": has_active_event,
                 
-                # Appended extra keys that your standalone Cat page can extract natively
+                # Standalone tracking parameters monitored by sub-interface
                 "pet_status": pet.get_status(),
                 "successful_feedings": pet.successful_feedings,
                 "daily_goal": pet.DAILY_GOAL
@@ -481,12 +551,28 @@ def run_vision_pipeline():
                 telemetry_data["confidence"] = evt_conf
                 telemetry_data["proximity"] = evt_prox
 
+            # --- AUTOMATED 24-HOUR MIDNIGHT RESET LOOP ---
+            check_today = time.strftime('%Y-%m-%d')
+            if check_today != current_cycle_day:
+                final_fate = pet.end_shift_and_reset()
+                log_system_telemetry(
+                    metric_name="tamagotchi_daily_lifecycle_summary",
+                    data_value=f"Date concluded: {current_cycle_day} | Final Pet Status: {final_fate}",
+                    log_level="INFO" if final_fate == "ALIVE" else "CRITICAL"
+                )
+                print(f"⏰ Midnight Rollover! Shift concluded pet status as: {final_fate}. Resetting counters.")
+                current_cycle_day = check_today
+                telemetry_data["daily_goal"] = pet.DAILY_GOAL
+
             # --- ONSCREEN RENDERING OVERLAYS ---
             if ALLOW_GUI_DISPLAY:  
-                # Print live Stage 1 NPU anchor evaluation metrics to catch false background shapes
+                # Output live Stage 1 NPU tracking confidence metrics to screen continuously
                 conf_text = f"NPU Conf: {int(final_conf * 100)}%"
                 cv2.putText(frame, conf_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
                 
+                fps_text = f"Engine: {current_calculated_fps} FPS"
+                cv2.putText(frame, fps_text, (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 250, 50), 2, cv2.LINE_AA)
+
                 if person_in_frame:
                     box_color = (0, 255, 0) if "NO" not in local_badge_status and "DETECTED" in local_badge_status else (0, 0, 255)
                     if distance_status != "OK" or "CALCULATING" in local_badge_status:

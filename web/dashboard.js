@@ -53,11 +53,25 @@ function connectWebSocket() {
             counterElement.textContent = verifiedEntryCount;
             addLedgerRow(data.time, data.profile, data.confidence, data.proximity);
             addLog(`[ALERT] Real-time ledger updated: ${data.profile} (${data.confidence})`);
-            return; // 🟢 Hard exit ensures we never touch the live HUD processing logic below!
+            return;
         }
 
-        // 3. Continuous real-time updates for the upper live HUD fields
-        // 🟢 ULTRA SAFETY GUARD: Explicitly check that badge_status exists and is a string before running toUpperCase
+        // --- STEP 3: DYNAMIC BASELINE HUD READOUT EXTENSION ---
+        if (data && data.daily_goal !== undefined) {
+            // 🟢 FIXED: This now runs ALWAYS so your green text tracker never goes blank!
+            const liveReadout = document.getElementById('current-json-baseline');
+            if (liveReadout) {
+                liveReadout.innerText = data.daily_goal;
+            }
+            
+            // Only update the actual input typing box if it's completely empty (like on a fresh page load)
+            const managerInput = document.getElementById('managerGoalInput');
+            if (managerInput && !managerInput.value) {
+                managerInput.value = data.daily_goal;
+            }
+        }
+
+        // 4. Continuous real-time updates for the upper live HUD fields
         if (data && typeof data.badge_status === 'string') {
             document.getElementById('badge-status').textContent = data.badge_status.toUpperCase();
             
@@ -111,5 +125,23 @@ function addLedgerRow(time, profile, confidence, distance) {
     ledgerBody.insertBefore(row, ledgerBody.firstChild);
 }
 
+// --- CONTEXT MANAGER SENDER FUNCTION LINKED TO CLICK EVENTS ---
+function updateDailyGoal(rawInputValue) {
+    // Parse the incoming argument value directly 
+    const newGoal = parseInt(rawInputValue, 10);
+    
+    // Boundary check validation pass
+    if (isNaN(newGoal) || newGoal < 1) {
+        addLog("[SYS] Configuration Error: Please enter a valid goal number.");
+        return;
+    }
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ "set_daily_goal": newGoal }));
+        addLog(`[SYS] Sent target goal shift request: ${newGoal}`);
+    } else {
+        addLog("[SYS] Error updating configuration: WebSocket transport stream link is offline.");
+    }
+}
 // Kickoff connection engine
 connectWebSocket();

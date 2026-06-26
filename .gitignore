@@ -11,6 +11,7 @@ runs/
 *.csv
 *.jpg
 dataset/
+*.json
 #ignore encyption
 *.enc
 *.key

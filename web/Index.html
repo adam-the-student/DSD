@@ -48,6 +48,58 @@
         .counter-value {
             color: #00ff66;
             font-size: 3rem;
+            margin-bottom: 5px;
+        }
+
+        /* --- SCRIPT INPUT CONTAINER FOR MANAGER CONFIGURATION --- */
+        .baseline-manager-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px dashed #29292e;
+            width: 100%;
+            max-width: 320px;
+        }
+        .baseline-label {
+            font-size: 0.8rem;
+            color: #8d8d99;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .baseline-input {
+            width: 55px;
+            background-color: #09090a;
+            border: 1px solid #29292e;
+            border-radius: 4px;
+            padding: 6px 8px;
+            color: #00ff66;
+            font-weight: bold;
+            font-size: 0.95rem;
+            text-align: center;
+        }
+        .baseline-input:focus {
+            outline: none;
+            border-color: #00ff66;
+        }
+        .baseline-btn {
+            background-color: #29292e;
+            color: #e1e1e6;
+            border: 1px solid #323238;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: all 0.2s ease;
+        }
+        .baseline-btn:hover {
+            background-color: #00ff66;
+            color: #09090a;
+            border-color: #00ff66;
         }
 
         /* Camera Remote Control Buttons */
@@ -140,7 +192,7 @@
         }
         td {
             padding: 12px;
-            border-bottom: 1px solidg #29292e;
+            border-bottom: 1px solid #29292e;
             background-color: #1d1d22;
         }
         tr:last-child td { border-bottom: none; }
@@ -152,16 +204,13 @@
             font-size: 0.8rem;
             font-weight: 600;
         }
-                /* 🟢 Compliant entries explicitly look green */
         .badge-tag.state-BADGE {
             background-color: rgba(80, 250, 123, 0.15);
             color: #50fa7b;
         }
-
-        /* 🔴 Violations explicitly look red */
         .badge-tag.state-NO-BADGE {
-            background-color: rgba(255, 85, 85, 0.15); /* 🟢 Soft red halo background */
-            color: #ff5555;                             /* Bright red text color */
+            background-color: rgba(255, 85, 85, 0.15); 
+            color: #ff5555;                             
         }
 
         .network-tag { font-size: 0.8rem; color: #6272a4; margin-top: 5px; }
@@ -177,8 +226,19 @@
         <div class="card full-width counter-card">
             <div class="metric-label">Total Valid Room Entries</div>
             <div class="metric-value counter-value" id="total-entries-count">0</div>
-            
             <div class="control-container">
+            </div>
+        </div>
+
+        <div class="card full-width" style="flex-direction: row; gap: 15px; justify-content: center; align-items: center; padding: 15px; background-color: #1d1d22;">
+            <span class="baseline-label" style="font-size: 0.85rem; color: #8d8d99; text-transform: uppercase; letter-spacing: 0.5px;">Daily Goal:</span>
+            
+            <input type="number" id="managerGoalInput" class="baseline-input" min="1" style="width: 55px; background-color: #09090a; border: 1px solid #29292e; border-radius: 4px; padding: 6px 8px; color: #00ff66; font-weight: bold; text-align: center;">
+            
+            <button onclick="updateDailyGoal(document.getElementById('managerGoalInput').value)" class="baseline-btn" style="background-color: #29292e; color: #e1e1e6; border: 1px solid #323238; padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; cursor: pointer; text-transform: uppercase;">Set</button>
+            
+            <div style="font-size: 0.85rem; color: #8d8d99; margin-left: 10px; border-left: 1px solid #29292e; padding-left: 15px;">
+                Active System Value: <span id="current-json-baseline" style="color: #00ff66; font-weight: bold; font-size: 1.1rem;">--</span>
             </div>
         </div>
 
@@ -215,7 +275,7 @@
                         </tr>
                     </thead>
                     <tbody id="ledger-body">
-                        </tbody>
+                    </tbody>
                 </table>
             </div>
         </div>
