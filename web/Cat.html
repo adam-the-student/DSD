@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <style>
+        li {
+            font-size:  50px;
+
+        }
+    </style>
     <title>Tamagotchi Cat Vitals</title>
 </head>
 <body>
@@ -11,8 +17,8 @@
 
     <h2>Readout:</h2>
     <ul>
-        <li><strong>Pet Status:</strong> <span id="pet_status">LOADING...</span></li>
-        <li><strong>Successful Feedings today:</strong> <span id="successful_feedings">0</span></li>
+        <!--<li><strong>Pet Status:</strong> <span id="pet_status">LOADING...</span></li> Pet status dont really want to show that rn lol -->
+        <li><strong>Successful Dosimeter IDs today:</strong> <span id="successful_feedings">0</span></li>
         <li><strong>Daily Baseline Goal:</strong> <span id="daily_goal">0</span></li>
     </ul>
 
@@ -31,20 +37,27 @@
         socket.onmessage = function(event) {
             const data = JSON.parse(event.data);
 
-            // Ignore startup history payloads and entry event alerts
-            if (data.is_startup_history || data.is_entry_event) {
-                return;
+            // 🟢 Handle History: If it's a history payload array, grab the last entry snapshot
+            let snapshot = data;
+            if (data.is_startup_history && Array.isArray(data.history) && data.history.length > 0) {
+                snapshot = data.history[data.history.length - 1];
+            } else if (data.is_startup_history) {
+                return; // Skip empty history arrays
             }
 
-            // Extract and update the specific raw pet metrics from the snapshot dictionary
-            if (data.pet_status !== undefined) {
-                document.getElementById('pet_status').innerText = data.pet_status;
+            // 🟢 Safe Dom Checks: Verify elements exist before attempting text manipulation updates
+            const petStatusEl = document.getElementById('pet_status');
+            const feedingsEl = document.getElementById('successful_feedings');
+            const goalEl = document.getElementById('daily_goal');
+
+            if (snapshot.pet_status !== undefined && petStatusEl) {
+                petStatusEl.innerText = snapshot.pet_status;
             }
-            if (data.successful_feedings !== undefined) {
-                document.getElementById('successful_feedings').innerText = data.successful_feedings;
+            if (snapshot.successful_feedings !== undefined && feedingsEl) {
+                feedingsEl.innerText = snapshot.successful_feedings;
             }
-            if (data.daily_goal !== undefined) {
-                document.getElementById('daily_goal').innerText = data.daily_goal;
+            if (snapshot.daily_goal !== undefined && goalEl) {
+                goalEl.innerText = snapshot.daily_goal;
             }
         };
 
