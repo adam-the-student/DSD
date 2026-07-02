@@ -153,7 +153,6 @@ CONFIDENCE_THRESHOLD = 60
 # --- CALIBRATION SETTINGS ---
 REAL_SHOULDER_WIDTH_INCHES = 17.0
 FOCAL_LENGTH_FACTOR = 318  # Aligned with your wide sensor profile calibration
-Offset = -60
 
 MIN_DISTANCE_FEET = 1    
 MAX_DISTANCE_FEET = 20  
@@ -279,7 +278,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 pass
             
             # 3. TRANSMIT STEADY OPERATIONAL TELEMETRY SNAPSHOTS
-            # Pull directly from our state engine instance variables
             if pet is not None:
                 telemetry_data["daily_goal"] = pet.DAILY_GOAL
                 telemetry_data["successful_feedings"] = pet.successful_feedings
@@ -432,7 +430,6 @@ def run_vision_pipeline():
 
                 final_conf = sigmoid(best_score)
 
-                # ADJUSTED CUSHION FILTER: Locked to 0.65 to enable reliable 70% target passes
                 if final_conf > 0.65 and best_ls_x > 0 and best_rs_x > 0:
                     person_in_frame = True
                     pixel_width = np.sqrt((best_ls_x - best_rs_x)**2 + (best_ls_y - best_rs_y)**2)
@@ -456,7 +453,10 @@ def run_vision_pipeline():
                     crop_x1 = shoulder_center_x - (box_width // 2)
                     crop_x2 = crop_x1 + box_width
                     
-                    crop_y1 = min(best_ls_y, best_rs_y) + Offset
+                    # 🟢 FIXED: Replaced hardcoded "-60" offset with a dynamic factor relative to box size.
+                    # This shifts the bounding box upward by exactly 25% of the target's scale profile.
+                    dynamic_upward_shift = int(box_height * 0.25)
+                    crop_y1 = min(best_ls_y, best_rs_y) - dynamic_upward_shift
                     crop_y2 = crop_y1 + box_height
                     
                     crop_x1, crop_y1 = max(0, crop_x1), max(0, crop_y1)
@@ -529,17 +529,13 @@ def run_vision_pipeline():
             score_readouts = " | ".join([f"{k}: {v}%" for k, v in active_probabilities.items()])
             HUD_badge_string = f"{local_badge_status} ({score_readouts})" if tracker.state != "IDLE" else "SCANNING..."
             
-            # Sync any potential dynamic adjustments back to engine object variables
             pet.DAILY_GOAL = telemetry_data.get("daily_goal", 5)
 
-            # Pack telemetry fields without disrupting default dashboard layouts
             telemetry_data.update({
                 "badge_status": HUD_badge_string,
                 "distance_status": distance_status,
                 "estimated_ft": estimated_ft if person_in_frame else 0.0,
                 "is_entry_event": has_active_event,
-                
-                # Standalone tracking parameters monitored by sub-interface
                 "pet_status": pet.get_status(),
                 "successful_feedings": pet.successful_feedings,
                 "daily_goal": pet.DAILY_GOAL
@@ -566,7 +562,6 @@ def run_vision_pipeline():
 
             # --- ONSCREEN RENDERING OVERLAYS ---
             if ALLOW_GUI_DISPLAY:  
-                # Output live Stage 1 NPU tracking confidence metrics to screen continuously
                 conf_text = f"NPU Conf: {int(final_conf * 100)}%"
                 cv2.putText(frame, conf_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
                 
