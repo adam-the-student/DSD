@@ -59,6 +59,7 @@ class BadgeTrackerStateMachine:
         self.current_user_final_decision = "UNKNOWN"
         self.frames_since_last_seen = 0
         self.max_lost_frames = 15  
+        self.current_user_last_distance = 0.0
 
     def update_presence(self, person_detected: bool):
         """Tracks arrivals and departures to reset or trigger logging summary events."""
@@ -75,10 +76,12 @@ class BadgeTrackerStateMachine:
                     return True # Signifies departure needs processing
         return False
 
-    def update_evaluation(self, decision: str, confidence: int, pet_engine_reference):
+    def update_evaluation(self, decision: str, confidence: int, estimated_ft, pet_engine_reference):
         """Updates internal memory metrics and logs compliance tracking feed metrics."""
         if self.state in ["TRACKING", "EVALUATING"]:
             self.state = "EVALUATING"
+
+            self.current_user_last_distance = estimated_ft
             
             if confidence > self.current_user_max_confidence:
                 self.current_user_max_confidence = confidence
@@ -93,7 +96,7 @@ class BadgeTrackerStateMachine:
                 if "NO" not in decision.upper() and decision != "UNKNOWN":
                     pet_engine_reference.register_successful_feeding()
 
-    def trigger_departure_event(self, frame, detector_results):
+    def trigger_departure_event(self, frame):
         """Logs interaction events quietly and drops the payload into the cross-thread queue."""
         global event_queue, pet, telemetry_data, connected_clients, main_event_loop
         from datetime import datetime
@@ -102,10 +105,12 @@ class BadgeTrackerStateMachine:
         profile_string = self.current_user_final_decision.title()
         log_level = "INFO" if "NO" not in self.current_user_final_decision.upper() and self.current_user_final_decision != "UNKNOWN" else "ERROR"
         
+        saved_dist = self.current_user_last_distance
+
         # 1. Update disk backup ledger
         log_system_telemetry(
             metric_name="wearer_departure_summary",
-            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}%",
+            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}% | Distance: {estimated_ft} ft",
             log_level=log_level
         )
         
@@ -115,7 +120,7 @@ class BadgeTrackerStateMachine:
             "time": datetime.now().strftime("%H:%M:%S"),
             "profile": profile_string,
             "confidence": f"{self.current_user_max_confidence}%",
-            "proximity": "3.5 ft"
+            "proximity": f"{estimated_ft} ft"
         }
         event_queue.put(payload)
                     
@@ -473,7 +478,7 @@ def run_vision_pipeline():
             # --- CALL EVERY FRAME INDEPENDENTLY ---
             has_departed = tracker.update_presence(person_in_frame)
             if has_departed:
-                tracker.trigger_departure_event(frame, None)
+                tracker.trigger_departure_event(frame)
 
             if tracker.state == "LOCKED":
                 local_badge_status = tracker.current_user_final_decision
@@ -519,7 +524,7 @@ def run_vision_pipeline():
                             log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
                 
                 if local_badge_status != "CALCULATING...":
-                    tracker.update_evaluation(local_badge_status, top_confidence, pet)
+                    tracker.update_evaluation(local_badge_status, top_confidence, estimated_ft, pet)
 
             has_active_event = telemetry_data.get("is_entry_event", False)
             evt_time = telemetry_data.get("time", None)
