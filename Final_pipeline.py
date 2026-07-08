@@ -332,7 +332,8 @@ def run_vision_pipeline():
 
     # --- STAGE 2: CPU CLASSIFIER SETUP ---
     print("Initializing Stage 2 Custom Model Zoo Classifier via CPU...")
-    stage2_classifier = YOLO("models/dosClassifier.pt")
+    #make sure to point to most recent model.
+    stage2_classifier = YOLO("models/dosClassifier1.pt")
 
     print("\n🚀 Starting Calibrated Distance Two-Stage Pipeline Background Engine.")
 

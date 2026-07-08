@@ -77,6 +77,15 @@ def run_sorting_utility():
             print(f"➡️ [{idx+1}] Skipped {file_name} (left in harvested folder).")
             continue
             
+        elif key == ord('x'):
+        # 🟢 Permanently erase the current file from the disk
+            try:
+                os.remove(source_path)
+                print(f"🗑️  [{idx+1}] Deleted {file_name}")
+            except Exception as e:
+                print(f"⚠️  Failed to delete {file_name}: {e}")
+
+            
         elif key == ord('q'):
             print("\nExiting dataset utility engine. Sorting paused.")
             break

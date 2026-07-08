@@ -6,7 +6,7 @@ model = YOLO('yolov8n-cls.pt')
 # 2. Run the native training engine on your structured data path
 print("Starting YOLOv8 training routine...")
 model.train(
-    data='dataset/raw',  # Point here so YOLO finds the required /train folder
+    data='dataset',  # Point here so YOLO finds the required /train folder
     epochs=10,
     imgsz=224,
     batch=4,                  # Small batch size keeps memory clean on the Pi 5
