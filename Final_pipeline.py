@@ -64,7 +64,7 @@ def log_thread_crashes(func):
             
             # Log straight to your telemetry CSV
             try:
-                from telemetry import log_system_telemetry # or wherever your log function lives
+                from telemetry import log_system_telemetry
                 log_system_telemetry("thread_crash_event", error_msg, "CRITICAL")
             except Exception:
                 pass
@@ -102,6 +102,7 @@ class BadgeTrackerStateMachine:
         if self.state in ["TRACKING", "EVALUATING"]:
             self.state = "EVALUATING"
 
+            # Capture distance value while they are actively tracked in front of lens
             self.current_user_last_distance = estimated_ft
             
             if confidence > self.current_user_max_confidence:
@@ -128,24 +129,24 @@ class BadgeTrackerStateMachine:
         
         saved_dist = self.current_user_last_distance
 
-        # 1. Update disk backup ledger
+        # 1. Update disk backup ledger using internal state machine memory slot
         log_system_telemetry(
             metric_name="wearer_departure_summary",
-            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}% | Distance: {self.current_user_last_distance} ft",
+            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}% | Distance: {saved_dist} ft",
             log_level=log_level
         )
         
-        # 2. Package event data for the web layout
+        # 2. Package event data dynamically for the plaintext web layout
         payload = {
             "is_entry_event": True,
             "time": datetime.now().strftime("%H:%M:%S"),
             "profile": profile_string,
             "confidence": f"{self.current_user_max_confidence}%",
-            "proximity": f"{self.current_user_last_distance} ft"
+            "proximity": f"{saved_dist} ft"
         }
         event_queue.put(payload)
                     
-        print(f"🚶 Person departed. Summary logged: {profile_string}")
+        print(f"🚶 Person departed. Summary logged: {profile_string} at {saved_dist} ft")
         
         # Reset unique transaction lock so the next person can log a feeding
         if pet is not None:
@@ -214,10 +215,9 @@ async def websocket_endpoint(websocket: WebSocket):
     connected_clients.add(websocket)
     
     main_event_loop = asyncio.get_running_loop()
-    
-    startup_history = []
     target_csv = get_daily_csv_path()
     
+    # 🟢 STREAM LIVE STARTUP LEDGER BACK AS RAW TEXT STRINGS DIRECTLY
     if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
         try:
             with open(target_csv, mode='r', encoding='utf-8', errors='ignore') as file:
@@ -230,12 +230,10 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as e:
             print(f"⚠️ Startup history log read error: {e}")
     else:
-        # 🟢 Send an explicit baseline notification if the file is completely blank!
         await websocket.send_json({
             "is_startup_history": True,
             "raw_text": "--- Telemetry log file is currently empty or uninitialized on disk ---"
         })
-
 
     try:
         while True:
@@ -270,7 +268,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         await websocket.send_json(live_alert)
                     except (RuntimeError, Exception):
-                        # Catch closed transport paths without killing the server process
                         pass
                     event_queue.task_done()
                     await asyncio.sleep(0.01)
@@ -304,7 +301,6 @@ def run_vision_pipeline():
     fps_frame_timestamps = []
     current_calculated_fps = 0.0
 
-    # Track calendar date string on loop entry to sync with daily logs
     current_cycle_day = time.strftime('%Y-%m-%d')
     telemetry_data["daily_goal"] = pet.DAILY_GOAL
 
@@ -324,25 +320,21 @@ def run_vision_pipeline():
 
     input_name = infer_model.input_names[0]
 
-    # Map out sandbox multi-scale layers and pixel downsampling strides
     layer_pairs = [
-        {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  # 20x20
-        {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  # 40x40
-        {"score": "yolov8s_pose/conv44", "keypoint": "yolov8s_pose/conv45", "stride": 8}    # 80x80
+        {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  
+        {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  
+        {"score": "yolov8s_pose/conv44", "keypoint": "yolov8s_pose/conv45", "stride": 8}    
     ]
 
     # --- STAGE 2: CPU CLASSIFIER SETUP ---
     print("Initializing Stage 2 Custom Model Zoo Classifier via CPU...")
-    #make sure to point to most recent model.
     stage2_classifier = YOLO("models/dosClassifier1.pt")
 
     print("\n🚀 Starting Calibrated Distance Two-Stage Pipeline Background Engine.")
 
-    # Configure the hardware execution wrapper context
     with infer_model.configure() as configured_infer_model:
         bindings = configured_infer_model.create_bindings()
         
-        # Pre-allocate output memory buffers matching sandbox test specification
         output_buffers = {}
         for name in infer_model.output_names:
             output_buffers[name] = np.empty(infer_model.output(name).shape, dtype=np.float32)
@@ -366,7 +358,6 @@ def run_vision_pipeline():
                 time.sleep(0.1)
                 continue
 
-            # Clean up color conversion from RGB to BGR to fix the blue tint bug
             if frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
             else:
@@ -374,12 +365,10 @@ def run_vision_pipeline():
                 
             clean_frame = frame.copy()
 
-            # Square padding allocation matching NPU input configuration profiles
             hailo_input_frame = cv2.resize(frame, (640, 640))
             input_array = np.expand_dims(hailo_input_frame, axis=0).astype(np.uint8)
             bindings.input(input_name).set_buffer(input_array)
             
-            # Fire accelerated execution pass on NPU
             configured_infer_model.run([bindings], timeout=1000)
             
             person_in_frame = False
@@ -397,7 +386,6 @@ def run_vision_pipeline():
             best_ls_x, best_ls_y = 0, 0
             best_rs_x, best_rs_y = 0, 0
 
-            # Multi-scale grid decoding loop to parse shoulders out of feature maps
             try:
                 for pair in layer_pairs:
                     score_tensor = output_buffers[pair["score"]]      
@@ -446,13 +434,11 @@ def run_vision_pipeline():
                     else:
                         distance_status = "OK"
 
-                    # 🟢 DISTANCE GATE: Only flag presence if they are within physical bounds
                     if distance_status == "OK":
                         person_in_frame = True
                     else:
                         person_in_frame = False
 
-                    # Construct tracking crop boundaries around center chest zone
                     box_width = int(pixel_width * 0.65)
                     box_height = box_width  
                     
@@ -460,8 +446,6 @@ def run_vision_pipeline():
                     crop_x1 = shoulder_center_x - (box_width // 2)
                     crop_x2 = crop_x1 + box_width
                     
-                    # 🟢 FIXED: Replaced hardcoded "-60" offset with a dynamic factor relative to box size.
-                    # This shifts the bounding box upward by exactly 25% of the target's scale profile.
                     dynamic_upward_shift = int(box_height * 0.25)
                     crop_y1 = min(best_ls_y, best_rs_y) - dynamic_upward_shift
                     crop_y2 = crop_y1 + box_height
@@ -484,16 +468,7 @@ def run_vision_pipeline():
             if tracker.state == "LOCKED":
                 local_badge_status = tracker.current_user_final_decision
             
-            if distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
-                if random.random() < RANDOM_HARVEST_PROBABILITY:
-                    identified_as_tech = False 
-                    enc_file = save_anonymized_and_encrypted_frame(
-                        cropped_chest_frame, None, prefix="rand", 
-                        crop_offsets=(crop_x1, crop_y1), is_rad_tech=identified_as_tech
-                    )
-                    if enc_file:
-                        log_system_telemetry("random_harvest", f"Saved baseline frame: {enc_file}", "INFO")
-
+            # Keep unblemished, clean crops for ambiguous model evaluation datasets
             if tracker.state != "LOCKED" and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
                 resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
                 classifier_results = stage2_classifier(resized_crop, verbose=False, imgsz=224)
@@ -513,22 +488,19 @@ def run_vision_pipeline():
                 else:
                     local_badge_status = "CALCULATING..."
 
-                
-                # Runs on EVERY evaluation frame subject to your cooldown throttle
                 current_time = time.time()
                 if current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS:
                     enc_file = save_anonymized_and_encrypted_frame(
                         cropped_chest_frame, 
                         None, 
-                        prefix="frame",      # 🟢 Forces "frame" prefix
-                        extra_suffix="",     # 🟢 Strips out confidence folders
+                        prefix="frame",      
+                        extra_suffix="",     
                         crop_offsets=(crop_x1, crop_y1)
                     )
                     if enc_file:
                         debug_dir = "debug_shoulders"
                         os.makedirs(debug_dir, exist_ok=True)
                         
-                        # Captures the frame with your original green circles, box, and HUD text intact
                         debug_filename = f"{debug_dir}/full_shoulder_{int(current_time)}.jpg"
                         cv2.imwrite(debug_filename, frame)
 
@@ -602,6 +574,15 @@ def run_vision_pipeline():
                     cv2.putText(frame, text_line1, (crop_x1, crop_y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2, cv2.LINE_AA)
                     cv2.putText(frame, text_line2, (crop_x1, crop_y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
                     cv2.putText(frame, text_line3, (crop_x1, crop_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
+
+                # === 🟢 NEW POSITION: HARVEST FULL FRAMES WITH HUD ANNOTATIONS PRESERVED ===
+                if person_in_frame and random.random() < RANDOM_HARVEST_PROBABILITY:
+                    enc_file = save_anonymized_and_encrypted_frame(
+                        frame, None, prefix="rand_hud", 
+                        crop_offsets=(crop_x1, crop_y1), is_rad_tech=False
+                    )
+                    if enc_file:
+                        log_system_telemetry("random_harvest", f"Saved full annotated HUD frame: {enc_file}", "INFO")
 
                 try:
                     cv2.imshow("Main Camera View", frame)
