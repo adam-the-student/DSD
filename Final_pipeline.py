@@ -51,6 +51,27 @@ main_event_loop = None
 event_queue = queue.Queue()
 pet = None  # Global anchor reference shared with network threads
 
+import traceback
+
+def log_thread_crashes(func):
+    """Decorator to catch and log any crash inside the decorated function."""
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            error_details = traceback.format_exc()
+            error_msg = f"Fatal Crash in {func.__name__}: {str(e)} | Line: {error_details.splitlines()[-2]}"
+            
+            # Log straight to your telemetry CSV
+            try:
+                from telemetry import log_system_telemetry # or wherever your log function lives
+                log_system_telemetry("thread_crash_event", error_msg, "CRITICAL")
+            except Exception:
+                pass
+                
+            print(f"\n💥 CRITICAL CRASH IN {func.__name__}:\n{error_details}")
+    return wrapper
+
 # --- TRACKING STATE MACHINE LAYER ---
 class BadgeTrackerStateMachine:
     def __init__(self):
@@ -110,7 +131,7 @@ class BadgeTrackerStateMachine:
         # 1. Update disk backup ledger
         log_system_telemetry(
             metric_name="wearer_departure_summary",
-            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}% | Distance: {estimated_ft} ft",
+            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}% | Distance: {self.current_user_last_distance} ft",
             log_level=log_level
         )
         
@@ -120,7 +141,7 @@ class BadgeTrackerStateMachine:
             "time": datetime.now().strftime("%H:%M:%S"),
             "profile": profile_string,
             "confidence": f"{self.current_user_max_confidence}%",
-            "proximity": f"{estimated_ft} ft"
+            "proximity": f"{self.current_user_last_distance} ft"
         }
         event_queue.put(payload)
                     
@@ -159,8 +180,8 @@ CONFIDENCE_THRESHOLD = 60
 REAL_SHOULDER_WIDTH_INCHES = 17.0
 FOCAL_LENGTH_FACTOR = 318  # Aligned with your wide sensor profile calibration
 
-MIN_DISTANCE_FEET = 1    
-MAX_DISTANCE_FEET = 20  
+MIN_DISTANCE_FEET = 0.5    
+MAX_DISTANCE_FEET = 10  
 
 telemetry_data = {
     "badge_status": "INITIALIZING...",
@@ -299,6 +320,7 @@ async def websocket_endpoint(websocket: WebSocket):
 def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
 
+@log_thread_crashes
 def run_vision_pipeline():
     global telemetry_data, picam, ALLOW_GUI_DISPLAY, last_harvest_time, pet
     
@@ -437,7 +459,6 @@ def run_vision_pipeline():
                 final_conf = sigmoid(best_score)
 
                 if final_conf > 0.65 and best_ls_x > 0 and best_rs_x > 0:
-                    person_in_frame = True
                     pixel_width = np.sqrt((best_ls_x - best_rs_x)**2 + (best_ls_y - best_rs_y)**2)
                     
                     if pixel_width > 0:
@@ -450,6 +471,12 @@ def run_vision_pipeline():
                         distance_status = "TOO CLOSE"
                     else:
                         distance_status = "OK"
+
+                    # 🟢 DISTANCE GATE: Only flag presence if they are within physical bounds
+                    if distance_status == "OK":
+                        person_in_frame = True
+                    else:
+                        person_in_frame = False
 
                     # Construct tracking crop boundaries around center chest zone
                     box_width = int(pixel_width * 0.65)
@@ -511,17 +538,28 @@ def run_vision_pipeline():
                     local_badge_status = f"{predicted_folder_name} DETECTED"
                 else:
                     local_badge_status = "CALCULATING..."
-                    current_time = time.time()
-                    if top_confidence >= 40 and (current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS):
-                        identified_as_tech = False
-                        enc_file = save_anonymized_and_encrypted_frame(
-                            cropped_chest_frame, None, prefix="edge", 
-                            extra_suffix=str(top_confidence), crop_offsets=(crop_x1, crop_y1),
-                            is_rad_tech=identified_as_tech
-                        )
-                        if enc_file:
-                            last_harvest_time = current_time
-                            log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
+
+                
+                # Runs on EVERY evaluation frame subject to your cooldown throttle
+                current_time = time.time()
+                if current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS:
+                    enc_file = save_anonymized_and_encrypted_frame(
+                        cropped_chest_frame, 
+                        None, 
+                        prefix="frame",      # 🟢 Forces "frame" prefix
+                        extra_suffix="",     # 🟢 Strips out confidence folders
+                        crop_offsets=(crop_x1, crop_y1)
+                    )
+                    if enc_file:
+                        debug_dir = "debug_shoulders"
+                        os.makedirs(debug_dir, exist_ok=True)
+                        
+                        # Captures the frame with your original green circles, box, and HUD text intact
+                        debug_filename = f"{debug_dir}/full_shoulder_{int(current_time)}.jpg"
+                        cv2.imwrite(debug_filename, frame)
+
+                        last_harvest_time = current_time
+                        log_system_telemetry("frame_harvest", f"Saved validation audit frame: {enc_file}", "INFO")
                 
                 if local_badge_status != "CALCULATING...":
                     tracker.update_evaluation(local_badge_status, top_confidence, estimated_ft, pet)
