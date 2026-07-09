@@ -181,7 +181,7 @@ REAL_SHOULDER_WIDTH_INCHES = 17.0
 FOCAL_LENGTH_FACTOR = 318  # Aligned with your wide sensor profile calibration
 
 MIN_DISTANCE_FEET = 0.5    
-MAX_DISTANCE_FEET = 10  
+MAX_DISTANCE_FEET = 7  
 
 telemetry_data = {
     "badge_status": "INITIALIZING...",
@@ -220,48 +220,22 @@ async def websocket_endpoint(websocket: WebSocket):
     
     if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
         try:
-            with open(target_csv, mode='r', errors='ignore') as file:
-                explicit_headers = ["timestamp", "log_level", "metric_name", "data_value"]
-                reader = csv.DictReader(file, fieldnames=explicit_headers)
+            with open(target_csv, mode='r', encoding='utf-8', errors='ignore') as file:
+                raw_history_text = file.read()
                 
-                for row in reader:
-                    if not row.get("metric_name") or not row.get("data_value"):
-                        continue
-                        
-                    metric_name = row["metric_name"].strip()
-                    raw_val = row["data_value"].strip()
-                    
-                    if metric_name == "wearer_departure_summary":
-                        if "Decision:" in raw_val:
-                            parsed_decision = raw_val.split("Decision:")[-1].split("|")[0].strip()
-                            profile_label = "❌ Unknown Status" if "UNKNOWN" in raw_val else parsed_decision.title()
-                            
-                            conf = "N/A"
-                            if "Max Conf:" in raw_val:
-                                conf = raw_val.split("Max Conf:")[-1].strip()
-                                
-                            time_stamp = row.get("timestamp", "").strip()
-                            if " " in time_stamp:
-                                time_stamp = time_stamp.split(" ")[-1]
-                                
-                            startup_history.append({
-                                "time": time_stamp,
-                                "profile": profile_label,
-                                "confidence": conf,
-                                "proximity": "3.5 ft"
-                            })
-        except Exception:
-            pass
-
-    if startup_history:
-        try:
             await websocket.send_json({
                 "is_startup_history": True,
-                "history": startup_history
+                "raw_text": raw_history_text
             })
-        except Exception:
-            connected_clients.discard(websocket)
-            return
+        except Exception as e:
+            print(f"⚠️ Startup history log read error: {e}")
+    else:
+        # 🟢 Send an explicit baseline notification if the file is completely blank!
+        await websocket.send_json({
+            "is_startup_history": True,
+            "raw_text": "--- Telemetry log file is currently empty or uninitialized on disk ---"
+        })
+
 
     try:
         while True:

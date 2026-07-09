@@ -2,7 +2,6 @@
 const logBox = document.getElementById('log-box');
 const netStatus = document.getElementById('net-status');
 const statusCard = document.getElementById('status-card');
-const ledgerBody = document.getElementById('ledger-body');
 const counterElement = document.getElementById('total-entries-count');
 
 let ws;
@@ -34,31 +33,41 @@ function connectWebSocket() {
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
+        const logViewer = document.getElementById("plaintext-log-view");
         
         // 1. Process initial CSV database reload upon connection initialization
-        if (data.is_startup_history && data.history) {
-            ledgerBody.innerHTML = ""; 
-            verifiedEntryCount = data.history.length;
-            counterElement.textContent = verifiedEntryCount;
-            
-            data.history.forEach(item => {
-                addLedgerRow(item.time, item.profile, item.confidence, item.proximity);
-            });
-            return; 
+        if (data.is_startup_history) {
+            if (logViewer) {
+                // Dump the raw plaintext logs straight into the box
+                logViewer.textContent = data.raw_text || "--- No entries recorded yet today ---";
+                
+                // Automatically scroll to the bottom so you see the newest logs instantly
+                logViewer.scrollTop = logViewer.scrollHeight;
+            }
+            return;
         }
 
-        // 2. PRIORITIZE LIVE MILESTONE EVENTS: Process instantly and exit the function completely
+        // 2. PRIORITIZE LIVE MILESTONE EVENTS: Process instantly and append live plaintext lines
         if (data.is_entry_event === true) {
             verifiedEntryCount++;
-            counterElement.textContent = verifiedEntryCount;
-            addLedgerRow(data.time, data.profile, data.confidence, data.proximity);
+            if (counterElement) {
+                counterElement.textContent = verifiedEntryCount;
+            }
+            
+            if (logViewer) {
+                // Construct a raw plaintext string line to mimic the file database structure
+                const logLine = `${data.time},[ALERT],wearer_departure_summary,Decision: ${data.profile} | Max Conf: ${data.confidence} | Distance: ${data.proximity}\n`;
+                logViewer.textContent += logLine;
+                logViewer.scrollTop = logViewer.scrollHeight;
+            }
+            
             addLog(`[ALERT] Real-time ledger updated: ${data.profile} (${data.confidence})`);
             return;
         }
 
         // --- STEP 3: DYNAMIC BASELINE HUD READOUT EXTENSION ---
         if (data && data.daily_goal !== undefined) {
-            // 🟢 FIXED: This now runs ALWAYS so your green text tracker never goes blank!
+            // This now runs ALWAYS so your green text tracker never goes blank!
             const liveReadout = document.getElementById('current-json-baseline');
             if (liveReadout) {
                 liveReadout.innerText = data.daily_goal;
@@ -107,24 +116,6 @@ function addLog(message) {
     logBox.scrollTop = logBox.scrollHeight;
 }
 
-function addLedgerRow(time, profile, confidence, distance) {
-    const row = document.createElement('tr');
-    
-    // Strict compliance check
-    const isCompliant = profile.startsWith("Valid") || profile.includes("Verified");
-    
-    const badgeClass = isCompliant ? "badge-tag state-BADGE" : "badge-tag state-NO-BADGE";
-    const labelText = isCompliant ? "✅ Dosimeter Verified" : "❌ No Dosimeter";
-
-    row.innerHTML = `
-        <td>${time}</td>
-        <td><span class="${badgeClass}" style="padding: 0.25rem 0.5rem; border-radius: 4px; font-weight: bold;">${labelText}</span></td>
-        <td>${confidence}</td>
-        <td>${distance}</td>
-    `;
-    ledgerBody.insertBefore(row, ledgerBody.firstChild);
-}
-
 // --- CONTEXT MANAGER SENDER FUNCTION LINKED TO CLICK EVENTS ---
 function updateDailyGoal(rawInputValue) {
     // Parse the incoming argument value directly 
@@ -143,5 +134,6 @@ function updateDailyGoal(rawInputValue) {
         addLog("[SYS] Error updating configuration: WebSocket transport stream link is offline.");
     }
 }
+
 // Kickoff connection engine
 connectWebSocket();
