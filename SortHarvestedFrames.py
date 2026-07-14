@@ -3,7 +3,7 @@ import os
 import shutil
 
 # --- DIRECTORY PATH CONFIGURATIONS ---
-SOURCE_DIR = "harvested_edge_cases"
+SOURCE_DIR = "dataset"
 TARGET_BADGE_DIR = os.path.join("dataset", "badge")
 TARGET_NO_BADGE_DIR = os.path.join("dataset", "no_badge")
 

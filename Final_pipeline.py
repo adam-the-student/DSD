@@ -98,26 +98,36 @@ class BadgeTrackerStateMachine:
         return False
 
     def update_evaluation(self, decision: str, confidence: int, estimated_ft, pet_engine_reference):
-        """Updates internal memory metrics and logs compliance tracking feed metrics."""
-        if self.state in ["TRACKING", "EVALUATING"]:
-            self.state = "EVALUATING"
-
-            # Capture distance value while they are actively tracked in front of lens
-            self.current_user_last_distance = estimated_ft
+        """Updates internal memory metrics and handles dynamic updates even if locked."""
+        if self.state in ["TRACKING", "EVALUATING", "LOCKED"]:
             
-            if confidence > self.current_user_max_confidence:
+            # 🟢 UPGRADE ALLOWED: If we were unbadged or unknown, let a high-confidence badge detection override it
+            is_currently_violating = "NO" in self.current_user_final_decision.upper() or self.current_user_final_decision == "UNKNOWN"
+            is_new_read_compliant = "NO" not in decision.upper() and "DETECTED" in decision.upper()
+
+            if self.state == "LOCKED" and is_currently_violating and is_new_read_compliant and confidence >= 60:
+                print(f"🔄 compliance status upgraded live: Shifted to {decision} at {confidence}%.")
                 self.current_user_max_confidence = confidence
                 self.current_user_final_decision = decision
-
-            # LOWERED GATE: Set to 60 to register locks cleanly alongside HUD reads
-            if confidence >= 60 and self.state != "LOCKED":
-                self.state = "LOCKED"
-                print(f"🔒 State LOCKED: {decision} confirmed at {confidence}%.")
+                # Keep state as LOCKED, but update the target decision values
+            
+            # Standard initial locking behavior for a fresh tracking session
+            elif self.state != "LOCKED":
+                self.state = "EVALUATING"
+                self.current_user_last_distance = estimated_ft
                 
-                # --- STEP C: Check technician compliance and feed the cat ---
-                if "NO" not in decision.upper() and decision != "UNKNOWN":
-                    pet_engine_reference.register_successful_feeding()
+                if confidence > self.current_user_max_confidence:
+                    self.current_user_max_confidence = confidence
+                    self.current_user_final_decision = decision
 
+                if confidence >= 60:
+                    self.state = "LOCKED"
+                    print(f"🔒 State LOCKED: {decision} confirmed at {confidence}%.")
+                    
+                    if "NO" not in decision.upper() and decision != "UNKNOWN":
+                        pet_engine_reference.register_successful_feeding()
+
+        
     def trigger_departure_event(self, frame):
         """Logs interaction events quietly and drops the payload into the cross-thread queue."""
         global event_queue, pet, telemetry_data, connected_clients, main_event_loop
@@ -328,7 +338,7 @@ def run_vision_pipeline():
 
     # --- STAGE 2: CPU CLASSIFIER SETUP ---
     print("Initializing Stage 2 Custom Model Zoo Classifier via CPU...")
-    stage2_classifier = YOLO("models/dosClassifier1.pt")
+    stage2_classifier = YOLO("models/dosClassifier3.pt")
 
     print("\n🚀 Starting Calibrated Distance Two-Stage Pipeline Background Engine.")
 
