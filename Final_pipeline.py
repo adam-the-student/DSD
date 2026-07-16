@@ -44,7 +44,7 @@ RANDOM_HARVEST_PROBABILITY = 0.01
 
 # --- PERFORMANCE HARVEST THROTTLES ---
 last_harvest_time = 0.0
-HARVEST_COOLDOWN_SECONDS = .5  
+HARVEST_COOLDOWN_SECONDS = 5.0  
 
 # --- GLOBAL ASYNC EVENT BRIDGE ---
 main_event_loop = None
@@ -109,7 +109,6 @@ class BadgeTrackerStateMachine:
                 print(f"🔄 compliance status upgraded live: Shifted to {decision} at {confidence}%.")
                 self.current_user_max_confidence = confidence
                 self.current_user_final_decision = decision
-                # Keep state as LOCKED, but update the target decision values
             
             # Standard initial locking behavior for a fresh tracking session
             elif self.state != "LOCKED":
@@ -133,7 +132,6 @@ class BadgeTrackerStateMachine:
         global event_queue, pet, telemetry_data, connected_clients, main_event_loop
         from datetime import datetime
 
-        # Dynamic profile parsing for the log string file layout
         profile_string = self.current_user_final_decision.title()
         log_level = "INFO" if "NO" not in self.current_user_final_decision.upper() and self.current_user_final_decision != "UNKNOWN" else "ERROR"
         
@@ -158,14 +156,12 @@ class BadgeTrackerStateMachine:
                     
         print(f"🚶 Person departed. Summary logged: {profile_string} at {saved_dist} ft")
         
-        # Reset unique transaction lock so the next person can log a feeding
         if pet is not None:
             pet.reset_user()
             telemetry_data["daily_goal"] = pet.DAILY_GOAL
             telemetry_data["successful_feedings"] = pet.successful_feedings
             telemetry_data["pet_status"] = pet.get_status()
             
-            # 🟢 SNAPPY BROADCAST GATES: Push live changes to connected web clients instantly!
             if main_event_loop is not None and connected_clients:
                 broadcast_payload = dict(telemetry_data)
                 for client in list(connected_clients):
@@ -189,7 +185,7 @@ CONFIDENCE_THRESHOLD = 60
 
 # --- CALIBRATION SETTINGS ---
 REAL_SHOULDER_WIDTH_INCHES = 17.0
-FOCAL_LENGTH_FACTOR = 318  # Aligned with your wide sensor profile calibration
+FOCAL_LENGTH_FACTOR = 318  
 
 MIN_DISTANCE_FEET = 0.5    
 MAX_DISTANCE_FEET = 7  
@@ -227,7 +223,6 @@ async def websocket_endpoint(websocket: WebSocket):
     main_event_loop = asyncio.get_running_loop()
     target_csv = get_daily_csv_path()
     
-    # 🟢 STREAM LIVE STARTUP LEDGER BACK AS RAW TEXT STRINGS DIRECTLY
     if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
         try:
             with open(target_csv, mode='r', encoding='utf-8', errors='ignore') as file:
@@ -249,17 +244,13 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             global event_queue
             
-            # 1. INDEPENDENT INCOMING MANAGER STREAM READER
             try:
                 raw_incoming = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
                 if raw_incoming:
                     parsed_incoming = json.loads(raw_incoming)
                     if "set_daily_goal" in parsed_incoming:
                         new_target = int(parsed_incoming["set_daily_goal"])
-                        
-                        # Apply to master telemetry dict cache instantly
                         telemetry_data["daily_goal"] = new_target
-                        
                         if pet is not None:
                             pet.DAILY_GOAL = new_target
                             pet.save_state_to_disk()
@@ -271,7 +262,6 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception as e:
                 print(f"⚠️ Internal manager parsing error: {e}")
             
-            # 2. DRAIN LIVE DEPARTURE EVENT QUEUE SAFELY
             try:
                 while not event_queue.empty():
                     live_alert = event_queue.get_nowait()
@@ -284,7 +274,6 @@ async def websocket_endpoint(websocket: WebSocket):
             except queue.Empty:
                 pass
             
-            # 3. TRANSMIT STEADY OPERATIONAL TELEMETRY SNAPSHOTS
             if pet is not None:
                 telemetry_data["daily_goal"] = pet.DAILY_GOAL
                 telemetry_data["successful_feedings"] = pet.successful_feedings
@@ -499,23 +488,32 @@ def run_vision_pipeline():
                     local_badge_status = "CALCULATING..."
 
                 current_time = time.time()
+                
+                # 1. Periodic validation harvest crops
                 if current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS:
+                    daily_prefix = os.path.join(time.strftime('%Y-%m-%d'), "frame")
                     enc_file = save_anonymized_and_encrypted_frame(
                         cropped_chest_frame, 
                         None, 
-                        prefix="frame",      
+                        prefix=daily_prefix,      
                         extra_suffix="",     
                         crop_offsets=(crop_x1, crop_y1)
                     )
                     if enc_file:
-                        debug_dir = "debug_shoulders"
-                        os.makedirs(debug_dir, exist_ok=True)
-                        
-                        debug_filename = f"{debug_dir}/full_shoulder_{int(current_time)}.jpg"
-                        cv2.imwrite(debug_filename, frame)
-
                         last_harvest_time = current_time
                         log_system_telemetry("frame_harvest", f"Saved validation audit frame: {enc_file}", "INFO")
+
+                # 2. Random harvest crops (rolled back to pass square chest crop as input to match Stage 2)
+                if random.random() < RANDOM_HARVEST_PROBABILITY:
+                    daily_rand_prefix = os.path.join(time.strftime('%Y-%m-%d'), "rand_frame")
+                    enc_file = save_anonymized_and_encrypted_frame(
+                        cropped_chest_frame, 
+                        None, 
+                        prefix=daily_rand_prefix, 
+                        crop_offsets=(crop_x1, crop_y1)
+                    )
+                    if enc_file:
+                        log_system_telemetry("random_harvest", f"Saved random crop frame: {enc_file}", "INFO")
                 
                 if local_badge_status != "CALCULATING...":
                     tracker.update_evaluation(local_badge_status, top_confidence, estimated_ft, pet)
@@ -584,15 +582,6 @@ def run_vision_pipeline():
                     cv2.putText(frame, text_line1, (crop_x1, crop_y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2, cv2.LINE_AA)
                     cv2.putText(frame, text_line2, (crop_x1, crop_y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
                     cv2.putText(frame, text_line3, (crop_x1, crop_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
-
-                # === 🟢 NEW POSITION: HARVEST FULL FRAMES WITH HUD ANNOTATIONS PRESERVED ===
-                if person_in_frame and random.random() < RANDOM_HARVEST_PROBABILITY:
-                    enc_file = save_anonymized_and_encrypted_frame(
-                        frame, None, prefix="rand_hud", 
-                        crop_offsets=(crop_x1, crop_y1), is_rad_tech=False
-                    )
-                    if enc_file:
-                        log_system_telemetry("random_harvest", f"Saved full annotated HUD frame: {enc_file}", "INFO")
 
                 try:
                     cv2.imshow("Main Camera View", frame)
