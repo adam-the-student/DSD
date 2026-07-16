@@ -70,7 +70,7 @@ def run_daily_audit():
             
         current_match_idx += 1
             
-        # Parse the filename out of text like: "Saved validation audit frame: frame_1784199755_PATIENT.jpg"
+        # Parse the reference filename from text
         if ":" in data_val:
             img_name = data_val.split(":")[-1].strip()
         else:
@@ -82,9 +82,25 @@ def run_daily_audit():
         if not timestamp_str:
             continue
 
+        target_timestamp = int(timestamp_str)
+        matching_files = []
+
+        # ⏳ TIME DRIFT WINDOW: Search for exact time, 1s before, and 1s after
+        for check_time in [target_timestamp, target_timestamp - 1, target_timestamp + 1]:
+            for prefix in ["frame", "rand_hud"]:
+                search_pattern = os.path.join(IMAGE_DIRECTORY, f"{prefix}_{check_time}*")
+                found = glob.glob(search_pattern)
+                if found:
+                    matching_files.extend(found)
+
+        if not matching_files:
+            print(f"⚠️ Item {current_match_idx}/{total_records} (Row {idx+1}): No image found on disk within 1s of timestamp {target_timestamp}")
+            continue
+            
+        # Grab the primary matched file
+        img_path = matching_files[0]
+
         # Look for the historical decision log. 
-        # Since it lives on a separate line in your telemetry file (e.g., wearer_departure_summary),
-        # we scan a few rows down to see if a decision was recorded right after this frame.
         historical_log = "No exit decision recorded at this timestamp"
         search_window = df.iloc[idx : min(idx + 5, len(df))]
         
@@ -92,16 +108,6 @@ def run_daily_audit():
             if sub_row.get('Metric_Name') == 'wearer_departure_summary':
                 historical_log = str(sub_row.get('Data_Value', 'UNKNOWN'))
                 break
-
-        # FUZZY SEARCH: Match the unique numeric ID against files on disk
-        search_pattern = os.path.join(IMAGE_DIRECTORY, f"*{timestamp_str}*")
-        matching_files = glob.glob(search_pattern)
-        
-        if not matching_files:
-            print(f"⚠️ Item {current_match_idx}/{total_records} (Row {idx+1}): No crop file found on disk for timestamp ID *{timestamp_str}*")
-            continue
-            
-        img_path = matching_files[0]
 
         # Load image for processing and display
         display_img = cv2.imread(img_path)
@@ -122,22 +128,26 @@ def run_daily_audit():
 
         # Resize image for clarity if it's a tight crop
         h, w, _ = display_img.shape
-        if w < 500 or h < 500:
-            display_img = cv2.resize(display_img, (500, 500), interpolation=cv2.INTER_LINEAR)
+        if w < 650 or h < 650:
+            display_img = cv2.resize(display_img, (650, 650), interpolation=cv2.INTER_LINEAR)
             h, w, _ = display_img.shape
 
-        # Make space at the top for information text overlay (solid dark canvas bar)
-        cv2.rectangle(display_img, (0, 0), (w, 85), (20, 20, 20), -1)
+        # Expanded top bar (115px tall) to comfortably hold the larger font lines without overlapping
+        cv2.rectangle(display_img, (0, 0), (w, 115), (20, 20, 20), -1)
 
         # Draw current model prediction metrics
         color = (0, 255, 0) if live_pred == "BADGE" and live_conf >= 0.60 else (0, 0, 255)
         live_info = f"LIVE MODEL: {live_pred} ({live_conf*100:.1f}%)"
         csv_info = f"HISTORICAL LOG: {historical_log}"
-        counter_info = f"Record [{current_match_idx}/{total_records}] | File: {os.path.basename(img_path)}"
+        
+        # Dynamically label what file type we are auditing in the window
+        file_type = "RANDOM HUD" if "rand_hud" in os.path.basename(img_path) else "VALIDATION CROP"
+        counter_info = f"[{current_match_idx}/{total_records}] ({file_type}) | {os.path.basename(img_path)}"
 
-        cv2.putText(display_img, live_info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-        cv2.putText(display_img, csv_info, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
-        cv2.putText(display_img, counter_info, (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (170, 170, 170), 1)
+        # Font scale increased significantly (from ~0.5 to 0.75 for main text rows, 0.60 for subtitle context)
+        cv2.putText(display_img, live_info, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2, cv2.LINE_AA)
+        cv2.putText(display_img, csv_info, (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.70, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(display_img, counter_info, (15, 98), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (170, 170, 170), 1, cv2.LINE_AA)
 
         # Draw an outer window border indicating pass/fail status
         cv2.rectangle(display_img, (0, 0), (w, h), color, 4)
@@ -157,7 +167,6 @@ def run_daily_audit():
     print("✅ Audit complete for this batch.")
 
 if __name__ == "__main__":
-    # Ensure folder paths exist cleanly
     os.makedirs(CSV_DIRECTORY, exist_ok=True)
     os.makedirs(IMAGE_DIRECTORY, exist_ok=True)
     run_daily_audit()
