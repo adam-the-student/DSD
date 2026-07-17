@@ -40,7 +40,7 @@ picam = None
 ALLOW_GUI_DISPLAY = not I_SSH_SESSION  
 
 # --- RANDOM SAMPLING CONFIGURATION ---
-RANDOM_HARVEST_PROBABILITY = 0.01
+RANDOM_HARVEST_PROBABILITY = 0.50  # BUMPED UP FOR FREQUENT DEBUG TESTING
 
 # --- PERFORMANCE HARVEST THROTTLES ---
 last_harvest_time = 0.0
@@ -180,6 +180,7 @@ class BadgeTrackerStateMachine:
         self.frames_since_last_seen = 0
 
 # --- CONFIGURATION TUNING CORNER ---
+IMAGE_DIRECTORY = "harvested_edge_cases"
 CLASSIFIER_IMG_SIZE = (224, 224)  
 CONFIDENCE_THRESHOLD = 60  
 
@@ -381,6 +382,8 @@ def run_vision_pipeline():
             top_confidence = 0
             predicted_folder_name = "UNKNOWN"
 
+            # Safely instantiate NPU boundary metrics to block UnboundLocalError exceptions
+            final_conf = 0.0
             best_score = -999.0
             best_ls_x, best_ls_y = 0, 0
             best_rs_x, best_rs_y = 0, 0
@@ -407,7 +410,7 @@ def run_vision_pipeline():
                                 
                                 global_ls_x = ((ls_x_offset * 2.0) + w) * stride
                                 global_ls_y = ((ls_y_offset * 2.0) + h) * stride
-                                global_rs_x = ((rs_x_offset * 2.0) + w) * stride
+                                global_rs_x = ((rs_x_offset * 2.0) + w) * stride  
                                 global_rs_y = ((rs_y_offset * 2.0) + h) * stride
                                 
                                 best_score = raw_score
@@ -467,7 +470,31 @@ def run_vision_pipeline():
             if tracker.state == "LOCKED":
                 local_badge_status = tracker.current_user_final_decision
             
-            # Keep unblemished, clean crops for ambiguous model evaluation datasets
+            current_time = time.time()
+            current_date_str = time.strftime('%Y-%m-%d')
+            full_target_dir = os.path.join(IMAGE_DIRECTORY, current_date_str)
+
+            # =====================================================================
+            # 🎲 GLOBAL RANDOM HARVEST LAYER (Decoupled from LOCKED constraints)
+            # =====================================================================
+            if person_in_frame and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
+                if random.random() < RANDOM_HARVEST_PROBABILITY:
+                    os.makedirs(full_target_dir, exist_ok=True) 
+                    daily_rand_prefix = os.path.join(current_date_str, "rand_frame")
+                    
+                    enc_file = save_anonymized_and_encrypted_frame(
+                        cropped_chest_frame, 
+                        None, 
+                        prefix=daily_rand_prefix, 
+                        extra_suffix="",
+                        crop_offsets=(crop_x1, crop_y1)
+                    )
+                    if enc_file:
+                        log_system_telemetry("random_harvest", f"Saved global random crop frame: {enc_file}", "INFO")
+
+            # =====================================================================
+            # 🔍 STAGE 2 CLASSIFIER & VALIDATION PERIODIC HARVEST LAYER
+            # =====================================================================
             if tracker.state != "LOCKED" and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
                 resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
                 classifier_results = stage2_classifier(resized_crop, verbose=False, imgsz=224)
@@ -486,12 +513,11 @@ def run_vision_pipeline():
                     local_badge_status = f"{predicted_folder_name} DETECTED"
                 else:
                     local_badge_status = "CALCULATING..."
-
-                current_time = time.time()
                 
                 # 1. Periodic validation harvest crops
                 if current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS:
-                    daily_prefix = os.path.join(time.strftime('%Y-%m-%d'), "frame")
+                    os.makedirs(full_target_dir, exist_ok=True) 
+                    daily_prefix = os.path.join(current_date_str, "frame")
                     enc_file = save_anonymized_and_encrypted_frame(
                         cropped_chest_frame, 
                         None, 
@@ -502,18 +528,6 @@ def run_vision_pipeline():
                     if enc_file:
                         last_harvest_time = current_time
                         log_system_telemetry("frame_harvest", f"Saved validation audit frame: {enc_file}", "INFO")
-
-                # 2. Random harvest crops (rolled back to pass square chest crop as input to match Stage 2)
-                if random.random() < RANDOM_HARVEST_PROBABILITY:
-                    daily_rand_prefix = os.path.join(time.strftime('%Y-%m-%d'), "rand_frame")
-                    enc_file = save_anonymized_and_encrypted_frame(
-                        cropped_chest_frame, 
-                        None, 
-                        prefix=daily_rand_prefix, 
-                        crop_offsets=(crop_x1, crop_y1)
-                    )
-                    if enc_file:
-                        log_system_telemetry("random_harvest", f"Saved random crop frame: {enc_file}", "INFO")
                 
                 if local_badge_status != "CALCULATING...":
                     tracker.update_evaluation(local_badge_status, top_confidence, estimated_ft, pet)

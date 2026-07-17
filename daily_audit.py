@@ -7,7 +7,7 @@ from ultralytics import YOLO
 # --- CONFIGURATION ---
 MODEL_PATH = "runs/classify/train-4/weights/best.pt"  # Your Stage 2 model
 CSV_DIRECTORY = "logs"                                # Directory where your daily CSV files are stored
-IMAGE_DIRECTORY = "harvested_edge_cases"                   # Root directory where the crop stills are stored
+IMAGE_DIRECTORY = "harvested_edge_cases"              # Root directory where the crop stills are stored
 
 def run_daily_audit():
     # 1. Sanity checks
@@ -76,8 +76,9 @@ def run_daily_audit():
         else:
             continue
             
-        # Clean up the numeric timestamp from the filename (e.g., 1784199755)
-        timestamp_str = "".join(filter(str.isdigit, img_name))
+        # 🎯 Extract only the filename to strip out subfolder date digits
+        clean_filename = os.path.basename(img_name)
+        timestamp_str = "".join(filter(str.isdigit, clean_filename))
         
         if not timestamp_str:
             continue
@@ -85,13 +86,12 @@ def run_daily_audit():
         target_timestamp = int(timestamp_str)
         matching_files = []
 
-        # ⏳ TIME DRIFT WINDOW: Search for exact time, 1s before, and 1s after
+        # ⏳ RECURSIVE TIME DRIFT WINDOW: Search all child directories dynamically by timestamp
         for check_time in [target_timestamp, target_timestamp - 1, target_timestamp + 1]:
-            for prefix in ["frame", "rand_hud"]:
-                search_pattern = os.path.join(IMAGE_DIRECTORY, f"{prefix}_{check_time}*")
-                found = glob.glob(search_pattern)
-                if found:
-                    matching_files.extend(found)
+            search_pattern = os.path.join(IMAGE_DIRECTORY, "**", f"*_{check_time}*")
+            found = glob.glob(search_pattern, recursive=True)
+            if found:
+                matching_files.extend(found)
 
         if not matching_files:
             print(f"⚠️ Item {current_match_idx}/{total_records} (Row {idx+1}): No image found on disk within 1s of timestamp {target_timestamp}")
@@ -140,8 +140,13 @@ def run_daily_audit():
         live_info = f"LIVE MODEL: {live_pred} ({live_conf*100:.1f}%)"
         csv_info = f"HISTORICAL LOG: {historical_log}"
         
-        # Dynamically label what file type we are auditing in the window
-        file_type = "RANDOM HUD" if "rand_hud" in os.path.basename(img_path) else "VALIDATION CROP"
+        # Dynamically label what file type we are auditing in the window based on string inspection
+        lower_filename = os.path.basename(img_path).lower()
+        if "rand" in lower_filename:
+            file_type = "RANDOM CROP"
+        else:
+            file_type = "VALIDATION CROP"
+            
         counter_info = f"[{current_match_idx}/{total_records}] ({file_type}) | {os.path.basename(img_path)}"
 
         # Font scale increased significantly (from ~0.5 to 0.75 for main text rows, 0.60 for subtitle context)
