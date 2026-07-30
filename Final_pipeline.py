@@ -40,7 +40,7 @@ picam = None
 ALLOW_GUI_DISPLAY = not I_SSH_SESSION  
 
 # --- RANDOM SAMPLING CONFIGURATION ---
-RANDOM_HARVEST_PROBABILITY = 0.01
+RANDOM_HARVEST_PROBABILITY = 0.10  
 
 # --- PERFORMANCE HARVEST THROTTLES ---
 last_harvest_time = 0.0
@@ -51,6 +51,27 @@ main_event_loop = None
 event_queue = queue.Queue()
 pet = None  # Global anchor reference shared with network threads
 
+import traceback
+
+def log_thread_crashes(func):
+    """Decorator to catch and log any crash inside the decorated function."""
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            error_details = traceback.format_exc()
+            error_msg = f"Fatal Crash in {func.__name__}: {str(e)} | Line: {error_details.splitlines()[-2]}"
+            
+            # Log straight to your telemetry CSV
+            try:
+                from telemetry import log_system_telemetry
+                log_system_telemetry("thread_crash_event", error_msg, "CRITICAL")
+            except Exception:
+                pass
+                
+            print(f"\n💥 CRITICAL CRASH IN {func.__name__}:\n{error_details}")
+    return wrapper
+
 # --- TRACKING STATE MACHINE LAYER ---
 class BadgeTrackerStateMachine:
     def __init__(self):
@@ -59,6 +80,7 @@ class BadgeTrackerStateMachine:
         self.current_user_final_decision = "UNKNOWN"
         self.frames_since_last_seen = 0
         self.max_lost_frames = 15  
+        self.current_user_last_distance = 0.0
 
     def update_presence(self, person_detected: bool):
         """Tracks arrivals and departures to reset or trigger logging summary events."""
@@ -75,60 +97,71 @@ class BadgeTrackerStateMachine:
                     return True # Signifies departure needs processing
         return False
 
-    def update_evaluation(self, decision: str, confidence: int, pet_engine_reference):
-        """Updates internal memory metrics and logs compliance tracking feed metrics."""
-        if self.state in ["TRACKING", "EVALUATING"]:
-            self.state = "EVALUATING"
+    def update_evaluation(self, decision: str, confidence: int, estimated_ft, pet_engine_reference):
+        """Updates internal memory metrics and handles dynamic updates even if locked."""
+        if self.state in ["TRACKING", "EVALUATING", "LOCKED"]:
             
-            if confidence > self.current_user_max_confidence:
+            # 🟢 UPGRADE ALLOWED: If we were unbadged or unknown, let a high-confidence badge detection override it
+            is_currently_violating = "NO" in self.current_user_final_decision.upper() or self.current_user_final_decision == "UNKNOWN"
+            is_new_read_compliant = "NO" not in decision.upper() and "DETECTED" in decision.upper()
+
+            if self.state == "LOCKED" and is_currently_violating and is_new_read_compliant and confidence >= 60:
+                print(f"🔄 compliance status upgraded live: Shifted to {decision} at {confidence}%.")
                 self.current_user_max_confidence = confidence
                 self.current_user_final_decision = decision
-
-            # LOWERED GATE: Set to 60 to register locks cleanly alongside HUD reads
-            if confidence >= 60 and self.state != "LOCKED":
-                self.state = "LOCKED"
-                print(f"🔒 State LOCKED: {decision} confirmed at {confidence}%.")
+            
+            # Standard initial locking behavior for a fresh tracking session
+            elif self.state != "LOCKED":
+                self.state = "EVALUATING"
+                self.current_user_last_distance = estimated_ft
                 
-                # --- STEP C: Check technician compliance and feed the cat ---
-                if "NO" not in decision.upper() and decision != "UNKNOWN":
-                    pet_engine_reference.register_successful_feeding()
+                if confidence > self.current_user_max_confidence:
+                    self.current_user_max_confidence = confidence
+                    self.current_user_final_decision = decision
 
-    def trigger_departure_event(self, frame, detector_results):
+                if confidence >= 60:
+                    self.state = "LOCKED"
+                    print(f"🔒 State LOCKED: {decision} confirmed at {confidence}%.")
+                    
+                    if "NO" not in decision.upper() and decision != "UNKNOWN":
+                        pet_engine_reference.register_successful_feeding()
+
+        
+    def trigger_departure_event(self, frame):
         """Logs interaction events quietly and drops the payload into the cross-thread queue."""
         global event_queue, pet, telemetry_data, connected_clients, main_event_loop
         from datetime import datetime
 
-        # Dynamic profile parsing for the log string file layout
         profile_string = self.current_user_final_decision.title()
         log_level = "INFO" if "NO" not in self.current_user_final_decision.upper() and self.current_user_final_decision != "UNKNOWN" else "ERROR"
         
-        # 1. Update disk backup ledger
+        saved_dist = self.current_user_last_distance
+
+        # 1. Update disk backup ledger using internal state machine memory slot
         log_system_telemetry(
             metric_name="wearer_departure_summary",
-            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}%",
+            data_value=f"Decision: {self.current_user_final_decision} | Max Conf: {self.current_user_max_confidence}% | Distance: {saved_dist} ft",
             log_level=log_level
         )
         
-        # 2. Package event data for the web layout
+        # 2. Package event data dynamically for the plaintext web layout
         payload = {
             "is_entry_event": True,
             "time": datetime.now().strftime("%H:%M:%S"),
             "profile": profile_string,
             "confidence": f"{self.current_user_max_confidence}%",
-            "proximity": "3.5 ft"
+            "proximity": f"{saved_dist} ft"
         }
         event_queue.put(payload)
                     
-        print(f"🚶 Person departed. Summary logged: {profile_string}")
+        print(f"🚶 Person departed. Summary logged: {profile_string} at {saved_dist} ft")
         
-        # Reset unique transaction lock so the next person can log a feeding
         if pet is not None:
             pet.reset_user()
             telemetry_data["daily_goal"] = pet.DAILY_GOAL
             telemetry_data["successful_feedings"] = pet.successful_feedings
             telemetry_data["pet_status"] = pet.get_status()
             
-            # 🟢 SNAPPY BROADCAST GATES: Push live changes to connected web clients instantly!
             if main_event_loop is not None and connected_clients:
                 broadcast_payload = dict(telemetry_data)
                 for client in list(connected_clients):
@@ -147,16 +180,16 @@ class BadgeTrackerStateMachine:
         self.frames_since_last_seen = 0
 
 # --- CONFIGURATION TUNING CORNER ---
+IMAGE_DIRECTORY = "harvested_edge_cases"
 CLASSIFIER_IMG_SIZE = (224, 224)  
 CONFIDENCE_THRESHOLD = 60  
 
 # --- CALIBRATION SETTINGS ---
 REAL_SHOULDER_WIDTH_INCHES = 17.0
-FOCAL_LENGTH_FACTOR = 318  # Aligned with your wide sensor profile calibration
-Offset = -60
+FOCAL_LENGTH_FACTOR = 318  
 
-MIN_DISTANCE_FEET = 1    
-MAX_DISTANCE_FEET = 20  
+MIN_DISTANCE_FEET = 0.5    
+MAX_DISTANCE_FEET = 7  
 
 telemetry_data = {
     "badge_status": "INITIALIZING...",
@@ -189,70 +222,36 @@ async def websocket_endpoint(websocket: WebSocket):
     connected_clients.add(websocket)
     
     main_event_loop = asyncio.get_running_loop()
-    
-    startup_history = []
     target_csv = get_daily_csv_path()
     
     if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
         try:
-            with open(target_csv, mode='r', errors='ignore') as file:
-                explicit_headers = ["timestamp", "log_level", "metric_name", "data_value"]
-                reader = csv.DictReader(file, fieldnames=explicit_headers)
+            with open(target_csv, mode='r', encoding='utf-8', errors='ignore') as file:
+                raw_history_text = file.read()
                 
-                for row in reader:
-                    if not row.get("metric_name") or not row.get("data_value"):
-                        continue
-                        
-                    metric_name = row["metric_name"].strip()
-                    raw_val = row["data_value"].strip()
-                    
-                    if metric_name == "wearer_departure_summary":
-                        if "Decision:" in raw_val:
-                            parsed_decision = raw_val.split("Decision:")[-1].split("|")[0].strip()
-                            profile_label = "❌ Unknown Status" if "UNKNOWN" in raw_val else parsed_decision.title()
-                            
-                            conf = "N/A"
-                            if "Max Conf:" in raw_val:
-                                conf = raw_val.split("Max Conf:")[-1].strip()
-                                
-                            time_stamp = row.get("timestamp", "").strip()
-                            if " " in time_stamp:
-                                time_stamp = time_stamp.split(" ")[-1]
-                                
-                            startup_history.append({
-                                "time": time_stamp,
-                                "profile": profile_label,
-                                "confidence": conf,
-                                "proximity": "3.5 ft"
-                            })
-        except Exception:
-            pass
-
-    if startup_history:
-        try:
             await websocket.send_json({
                 "is_startup_history": True,
-                "history": startup_history
+                "raw_text": raw_history_text
             })
-        except Exception:
-            connected_clients.discard(websocket)
-            return
+        except Exception as e:
+            print(f"⚠️ Startup history log read error: {e}")
+    else:
+        await websocket.send_json({
+            "is_startup_history": True,
+            "raw_text": "--- Telemetry log file is currently empty or uninitialized on disk ---"
+        })
 
     try:
         while True:
             global event_queue
             
-            # 1. INDEPENDENT INCOMING MANAGER STREAM READER
             try:
                 raw_incoming = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
                 if raw_incoming:
                     parsed_incoming = json.loads(raw_incoming)
                     if "set_daily_goal" in parsed_incoming:
                         new_target = int(parsed_incoming["set_daily_goal"])
-                        
-                        # Apply to master telemetry dict cache instantly
                         telemetry_data["daily_goal"] = new_target
-                        
                         if pet is not None:
                             pet.DAILY_GOAL = new_target
                             pet.save_state_to_disk()
@@ -264,22 +263,18 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception as e:
                 print(f"⚠️ Internal manager parsing error: {e}")
             
-            # 2. DRAIN LIVE DEPARTURE EVENT QUEUE SAFELY
             try:
                 while not event_queue.empty():
                     live_alert = event_queue.get_nowait()
                     try:
                         await websocket.send_json(live_alert)
                     except (RuntimeError, Exception):
-                        # Catch closed transport paths without killing the server process
                         pass
                     event_queue.task_done()
                     await asyncio.sleep(0.01)
             except queue.Empty:
                 pass
             
-            # 3. TRANSMIT STEADY OPERATIONAL TELEMETRY SNAPSHOTS
-            # Pull directly from our state engine instance variables
             if pet is not None:
                 telemetry_data["daily_goal"] = pet.DAILY_GOAL
                 telemetry_data["successful_feedings"] = pet.successful_feedings
@@ -296,6 +291,7 @@ async def websocket_endpoint(websocket: WebSocket):
 def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
 
+@log_thread_crashes
 def run_vision_pipeline():
     global telemetry_data, picam, ALLOW_GUI_DISPLAY, last_harvest_time, pet
     
@@ -305,7 +301,6 @@ def run_vision_pipeline():
     fps_frame_timestamps = []
     current_calculated_fps = 0.0
 
-    # Track calendar date string on loop entry to sync with daily logs
     current_cycle_day = time.strftime('%Y-%m-%d')
     telemetry_data["daily_goal"] = pet.DAILY_GOAL
 
@@ -325,24 +320,21 @@ def run_vision_pipeline():
 
     input_name = infer_model.input_names[0]
 
-    # Map out sandbox multi-scale layers and pixel downsampling strides
     layer_pairs = [
-        {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  # 20x20
-        {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  # 40x40
-        {"score": "yolov8s_pose/conv44", "keypoint": "yolov8s_pose/conv45", "stride": 8}    # 80x80
+        {"score": "yolov8s_pose/conv71", "keypoint": "yolov8s_pose/conv72", "stride": 32},  
+        {"score": "yolov8s_pose/conv58", "keypoint": "yolov8s_pose/conv59", "stride": 16},  
+        {"score": "yolov8s_pose/conv44", "keypoint": "yolov8s_pose/conv45", "stride": 8}    
     ]
 
     # --- STAGE 2: CPU CLASSIFIER SETUP ---
     print("Initializing Stage 2 Custom Model Zoo Classifier via CPU...")
-    stage2_classifier = YOLO("models/dosClassifier.pt")
+    stage2_classifier = YOLO("models/dosClassifier3.pt")
 
     print("\n🚀 Starting Calibrated Distance Two-Stage Pipeline Background Engine.")
 
-    # Configure the hardware execution wrapper context
     with infer_model.configure() as configured_infer_model:
         bindings = configured_infer_model.create_bindings()
         
-        # Pre-allocate output memory buffers matching sandbox test specification
         output_buffers = {}
         for name in infer_model.output_names:
             output_buffers[name] = np.empty(infer_model.output(name).shape, dtype=np.float32)
@@ -366,7 +358,6 @@ def run_vision_pipeline():
                 time.sleep(0.1)
                 continue
 
-            # Clean up color conversion from RGB to BGR to fix the blue tint bug
             if frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
             else:
@@ -374,12 +365,10 @@ def run_vision_pipeline():
                 
             clean_frame = frame.copy()
 
-            # Square padding allocation matching NPU input configuration profiles
             hailo_input_frame = cv2.resize(frame, (640, 640))
             input_array = np.expand_dims(hailo_input_frame, axis=0).astype(np.uint8)
             bindings.input(input_name).set_buffer(input_array)
             
-            # Fire accelerated execution pass on NPU
             configured_infer_model.run([bindings], timeout=1000)
             
             person_in_frame = False
@@ -393,11 +382,12 @@ def run_vision_pipeline():
             top_confidence = 0
             predicted_folder_name = "UNKNOWN"
 
+            # Safely instantiate NPU boundary metrics to block UnboundLocalError exceptions
+            final_conf = 0.0
             best_score = -999.0
             best_ls_x, best_ls_y = 0, 0
             best_rs_x, best_rs_y = 0, 0
 
-            # Multi-scale grid decoding loop to parse shoulders out of feature maps
             try:
                 for pair in layer_pairs:
                     score_tensor = output_buffers[pair["score"]]      
@@ -420,7 +410,7 @@ def run_vision_pipeline():
                                 
                                 global_ls_x = ((ls_x_offset * 2.0) + w) * stride
                                 global_ls_y = ((ls_y_offset * 2.0) + h) * stride
-                                global_rs_x = ((rs_x_offset * 2.0) + w) * stride
+                                global_rs_x = ((rs_x_offset * 2.0) + w) * stride  
                                 global_rs_y = ((rs_y_offset * 2.0) + h) * stride
                                 
                                 best_score = raw_score
@@ -432,9 +422,7 @@ def run_vision_pipeline():
 
                 final_conf = sigmoid(best_score)
 
-                # ADJUSTED CUSHION FILTER: Locked to 0.65 to enable reliable 70% target passes
                 if final_conf > 0.65 and best_ls_x > 0 and best_rs_x > 0:
-                    person_in_frame = True
                     pixel_width = np.sqrt((best_ls_x - best_rs_x)**2 + (best_ls_y - best_rs_y)**2)
                     
                     if pixel_width > 0:
@@ -448,7 +436,11 @@ def run_vision_pipeline():
                     else:
                         distance_status = "OK"
 
-                    # Construct tracking crop boundaries around center chest zone
+                    if distance_status == "OK":
+                        person_in_frame = True
+                    else:
+                        person_in_frame = False
+
                     box_width = int(pixel_width * 0.65)
                     box_height = box_width  
                     
@@ -456,7 +448,8 @@ def run_vision_pipeline():
                     crop_x1 = shoulder_center_x - (box_width // 2)
                     crop_x2 = crop_x1 + box_width
                     
-                    crop_y1 = min(best_ls_y, best_rs_y) + Offset
+                    dynamic_upward_shift = int(box_height * 0.25)
+                    crop_y1 = min(best_ls_y, best_rs_y) - dynamic_upward_shift
                     crop_y2 = crop_y1 + box_height
                     
                     crop_x1, crop_y1 = max(0, crop_x1), max(0, crop_y1)
@@ -472,21 +465,36 @@ def run_vision_pipeline():
             # --- CALL EVERY FRAME INDEPENDENTLY ---
             has_departed = tracker.update_presence(person_in_frame)
             if has_departed:
-                tracker.trigger_departure_event(frame, None)
+                tracker.trigger_departure_event(frame)
 
             if tracker.state == "LOCKED":
                 local_badge_status = tracker.current_user_final_decision
             
-            if distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
+            current_time = time.time()
+            current_date_str = time.strftime('%Y-%m-%d')
+            full_target_dir = os.path.join(IMAGE_DIRECTORY, current_date_str)
+
+            # =====================================================================
+            # 🎲 GLOBAL RANDOM HARVEST LAYER (Decoupled from LOCKED constraints)
+            # =====================================================================
+            if person_in_frame and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
                 if random.random() < RANDOM_HARVEST_PROBABILITY:
-                    identified_as_tech = False 
+                    os.makedirs(full_target_dir, exist_ok=True) 
+                    daily_rand_prefix = os.path.join(current_date_str, "rand_frame")
+                    
                     enc_file = save_anonymized_and_encrypted_frame(
-                        cropped_chest_frame, None, prefix="rand", 
-                        crop_offsets=(crop_x1, crop_y1), is_rad_tech=identified_as_tech
+                        cropped_chest_frame, 
+                        None, 
+                        prefix=daily_rand_prefix, 
+                        extra_suffix="",
+                        crop_offsets=(crop_x1, crop_y1)
                     )
                     if enc_file:
-                        log_system_telemetry("random_harvest", f"Saved baseline frame: {enc_file}", "INFO")
+                        log_system_telemetry("random_harvest", f"Saved global random crop frame: {enc_file}", "INFO")
 
+            # =====================================================================
+            # 🔍 STAGE 2 CLASSIFIER & VALIDATION PERIODIC HARVEST LAYER
+            # =====================================================================
             if tracker.state != "LOCKED" and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
                 resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
                 classifier_results = stage2_classifier(resized_crop, verbose=False, imgsz=224)
@@ -505,20 +513,24 @@ def run_vision_pipeline():
                     local_badge_status = f"{predicted_folder_name} DETECTED"
                 else:
                     local_badge_status = "CALCULATING..."
-                    current_time = time.time()
-                    if top_confidence >= 40 and (current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS):
-                        identified_as_tech = False
-                        enc_file = save_anonymized_and_encrypted_frame(
-                            cropped_chest_frame, None, prefix="edge", 
-                            extra_suffix=str(top_confidence), crop_offsets=(crop_x1, crop_y1),
-                            is_rad_tech=identified_as_tech
-                        )
-                        if enc_file:
-                            last_harvest_time = current_time
-                            log_system_telemetry("data_harvest", f"Saved ambiguous frame: {enc_file}", "WARNING")
+                
+                # 1. Periodic validation harvest crops
+                if current_time - last_harvest_time >= HARVEST_COOLDOWN_SECONDS:
+                    os.makedirs(full_target_dir, exist_ok=True) 
+                    daily_prefix = os.path.join(current_date_str, "frame")
+                    enc_file = save_anonymized_and_encrypted_frame(
+                        cropped_chest_frame, 
+                        None, 
+                        prefix=daily_prefix,      
+                        extra_suffix="",     
+                        crop_offsets=(crop_x1, crop_y1)
+                    )
+                    if enc_file:
+                        last_harvest_time = current_time
+                        log_system_telemetry("frame_harvest", f"Saved validation audit frame: {enc_file}", "INFO")
                 
                 if local_badge_status != "CALCULATING...":
-                    tracker.update_evaluation(local_badge_status, top_confidence, pet)
+                    tracker.update_evaluation(local_badge_status, top_confidence, estimated_ft, pet)
 
             has_active_event = telemetry_data.get("is_entry_event", False)
             evt_time = telemetry_data.get("time", None)
@@ -529,17 +541,13 @@ def run_vision_pipeline():
             score_readouts = " | ".join([f"{k}: {v}%" for k, v in active_probabilities.items()])
             HUD_badge_string = f"{local_badge_status} ({score_readouts})" if tracker.state != "IDLE" else "SCANNING..."
             
-            # Sync any potential dynamic adjustments back to engine object variables
             pet.DAILY_GOAL = telemetry_data.get("daily_goal", 5)
 
-            # Pack telemetry fields without disrupting default dashboard layouts
             telemetry_data.update({
                 "badge_status": HUD_badge_string,
                 "distance_status": distance_status,
                 "estimated_ft": estimated_ft if person_in_frame else 0.0,
                 "is_entry_event": has_active_event,
-                
-                # Standalone tracking parameters monitored by sub-interface
                 "pet_status": pet.get_status(),
                 "successful_feedings": pet.successful_feedings,
                 "daily_goal": pet.DAILY_GOAL
@@ -566,7 +574,6 @@ def run_vision_pipeline():
 
             # --- ONSCREEN RENDERING OVERLAYS ---
             if ALLOW_GUI_DISPLAY:  
-                # Output live Stage 1 NPU tracking confidence metrics to screen continuously
                 conf_text = f"NPU Conf: {int(final_conf * 100)}%"
                 cv2.putText(frame, conf_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
                 

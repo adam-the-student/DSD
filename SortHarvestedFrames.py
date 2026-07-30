@@ -3,7 +3,7 @@ import os
 import shutil
 
 # --- DIRECTORY PATH CONFIGURATIONS ---
-SOURCE_DIR = "harvested_edge_cases"
+SOURCE_DIR = "dataset"
 TARGET_BADGE_DIR = os.path.join("dataset", "badge")
 TARGET_NO_BADGE_DIR = os.path.join("dataset", "no_badge")
 
@@ -76,6 +76,15 @@ def run_sorting_utility():
             # Keep image file anchored right inside source tracking cache
             print(f"➡️ [{idx+1}] Skipped {file_name} (left in harvested folder).")
             continue
+            
+        elif key == ord('x'):
+        # 🟢 Permanently erase the current file from the disk
+            try:
+                os.remove(source_path)
+                print(f"🗑️  [{idx+1}] Deleted {file_name}")
+            except Exception as e:
+                print(f"⚠️  Failed to delete {file_name}: {e}")
+
             
         elif key == ord('q'):
             print("\nExiting dataset utility engine. Sorting paused.")
