@@ -2,73 +2,245 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tamagotchi Cat Vitals</title>
     <style>
-        li {
-            font-size:  50px;
+        /* Minimalist Dark Tech Theme */
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+            transition: background-color 0.3s;
+        }
+        
+        /* Critical Warning Flash Animation */
+        @keyframes criticalFlash {
+            0% { background-color: #550000; }
+            100% { background-color: #121212; }
+        }
+        .flash-active {
+            animation: criticalFlash 0.8s ease-out;
+        }
 
+        .monitor-container {
+            border: 2px solid #333;
+            border-radius: 16px;
+            padding: 3vw;
+            background-color: #1e1e1e;
+            text-align: center;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.7);
+            
+            width: 85vw;
+            max-width: 1200px;
+            height: 85vh;
+            max-height: 800px;
+            
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            box-sizing: border-box;
+        }
+        
+        .mascot-container {
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .mascot-container img {
+            height: 45vh;
+            max-height: 450px;
+            object-fit: contain;
+            border-radius: 12px;
+            background-color: #121212;
+            padding: 20px;
+            border: 2px solid #333;
+            image-rendering: pixelated; 
+        }
+        
+        .status-text {
+            font-size: 2.5rem;
+            font-weight: bold;
+            margin-bottom: 2vh;
+            color: #8d8d99;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        /* Updated Stats Grid for 3 Columns */
+        .stats-grid {
+            display: flex;
+            justify-content: space-evenly;
+            background-color: #2a2a2a;
+            padding: 3vh 1vw;
+            border-radius: 12px;
+            border: 1px solid #444;
+        }
+        .stat-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 30%;
+        }
+        .stat-label {
+            font-size: 1.2rem;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 10px;
+        }
+        .stat-value {
+            font-size: 5rem;
+            font-weight: bold;
+            color: #fff;
+            line-height: 1;
+        }
+        
+        .connection-status {
+            font-size: 1rem;
+            color: #00ff66;
+            margin-top: 2vh;
+            letter-spacing: 1px;
         }
     </style>
-    <title>Tamagotchi Cat Vitals</title>
 </head>
 <body>
 
-    <h1>MONITOR</h1>
-    <hr>
+    <div class="monitor-container">
+        
+        <div class="mascot-container">
+            <img id="retro-cat-mascot" src="/static/GIFS/nukoMagnifyingGlass.gif" alt="Cat Mascot">
+        </div>
+        
+        <div id="vitals-mood-text" class="status-text">SYSTEM LINK: CALIBRATING...</div>
 
-    <h2>Readout:</h2>
-    <ul>
-        <!--<li><strong>Pet Status:</strong> <span id="pet_status">LOADING...</span></li> Pet status dont really want to show that rn lol -->
-        <li><strong>Successful Dosimeter IDs today:</strong> <span id="successful_feedings">0</span></li>
-        <li><strong>Daily Baseline Goal:</strong> <span id="daily_goal">0</span></li>
-    </ul>
+        <!-- Check-ins, Streak, and Baseline Dashboard -->
+        <div class="stats-grid">
+            <div class="stat-box">
+                <span class="stat-label">Check-ins</span>
+                <span id="successful_feedings" class="stat-value">0</span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-label">Streak (Days)</span>
+                <span id="streak_count" class="stat-value">0</span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-label">Baseline</span>
+                <span id="daily_goal" class="stat-value">0</span>
+            </div>
+        </div>
 
-    <hr>
-    <h3>System Debug Connection State: <span id="ws_status">Disconnected</span></h3>
+        <div id="ws_status" class="connection-status">● LIVE SECURE LINK</div>
+    </div>
 
     <script>
-        // Connect to the existing master pipeline WebSocket stream
-        const socket = new WebSocket(`ws://${window.location.host}/ws`);
+        let catSocket;
+        let currentGif = ""; 
 
-        socket.onopen = function(e) {
-            document.getElementById('ws_status').innerText = "Connected";
-            document.getElementById('ws_status').style.color = "green";
-        };
+        function connectCatWebSocket() {
+            catSocket = new WebSocket(`ws://${window.location.host}/ws`);
 
-        socket.onmessage = function(event) {
-            const data = JSON.parse(event.data);
+            catSocket.onopen = () => {
+                const wsStatus = document.getElementById('ws_status');
+                wsStatus.innerText = "● LIVE SECURE LINK";
+                wsStatus.style.color = "#00ff66";
+            };
 
-            // 🟢 Handle History: If it's a history payload array, grab the last entry snapshot
-            let snapshot = data;
-            if (data.is_startup_history && Array.isArray(data.history) && data.history.length > 0) {
-                snapshot = data.history[data.history.length - 1];
-            } else if (data.is_startup_history) {
-                return; // Skip empty history arrays
+            catSocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                
+                if (data.is_startup_history) return;
+
+                if (data.successful_feedings !== undefined) {
+                    document.getElementById('successful_feedings').innerText = data.successful_feedings;
+                }
+                if (data.daily_goal !== undefined) {
+                    document.getElementById('daily_goal').innerText = data.daily_goal;
+                }
+                if (data.streak !== undefined) {
+                    document.getElementById('streak_count').innerText = data.streak;
+                }
+
+                updateCatAnimation(data.badge_status, data.pet_status);
+            };
+
+            catSocket.onclose = () => {
+                const wsStatus = document.getElementById('ws_status');
+                wsStatus.innerText = "○ LINK DISCONNECTED";
+                wsStatus.style.color = "#ff5555";
+                
+                document.getElementById('vitals-mood-text').innerText = "SYSTEM LINK: OFFLINE";
+                document.getElementById('vitals-mood-text').style.color = "#ff5555";
+                
+                setTimeout(connectCatWebSocket, 2000); 
+            };
+        }
+
+        function updateCatAnimation(systemStatus, petStatus) {
+            const catImage = document.getElementById('retro-cat-mascot');
+            const statusLabel = document.getElementById('vitals-mood-text');
+            if (!catImage || !statusLabel) return;
+
+            const normalizedStatus = (systemStatus || "").toUpperCase();
+            const normalizedPet = (petStatus || "").toUpperCase();
+
+            let targetGif = "";
+            let targetText = "";
+            let targetColor = "";
+
+            if (normalizedStatus.includes("INITIALIZING") || normalizedStatus.includes("SCANNING")) {
+                targetGif = "/static/GIFS/nukoMagnifyingGlass.gif";
+                targetText = "SCANNING AREA...";
+                targetColor = "#8d8d99";
+            } 
+            else if (normalizedStatus.includes("NO BADGE") || normalizedStatus.includes("ALERT")) {
+                targetGif = "/static/GIFS/nukoWorriedQuestion.gif";
+                targetText = "WARNING: NO BADGE";
+                targetColor = "#ff5555";
+                
+                // Trigger the screen flash by resetting the animation class
+                document.body.classList.remove('flash-active');
+                void document.body.offsetWidth; // Force a DOM reflow
+                document.body.classList.add('flash-active');
+            } 
+            else if (normalizedStatus.includes("BADGE DETECTED") || normalizedStatus.includes("DOS DETECTED")) {
+                targetGif = "/static/GIFS/nukoCatLick.gif";
+                targetText = "CHECK-IN CONFIRMED!";
+                targetColor = "#00ff66";
+            } 
+            else if (normalizedPet === "DEAD" || normalizedPet === "SICK") {
+                targetGif = "/static/GIFS/nukoEmbarrassedDrop.gif";
+                targetText = "CRITICAL HEALTH";
+                targetColor = "#ff5555";
+            } 
+            else if (normalizedPet === "SATISFIED" || normalizedPet === "FULL") {
+                targetGif = "/static/GIFS/nukoCatHeart.gif";
+                targetText = "DAILY TARGET REACHED";
+                targetColor = "#00ff66";
+            } 
+            else {
+                targetGif = "/static/GIFS/nukoCatSniff.gif";
+                targetText = "SYSTEM ACTIVE";
+                targetColor = "#8d8d99";
             }
 
-            // 🟢 Safe Dom Checks: Verify elements exist before attempting text manipulation updates
-            const petStatusEl = document.getElementById('pet_status');
-            const feedingsEl = document.getElementById('successful_feedings');
-            const goalEl = document.getElementById('daily_goal');
-
-            if (snapshot.pet_status !== undefined && petStatusEl) {
-                petStatusEl.innerText = snapshot.pet_status;
+            if (currentGif !== targetGif) {
+                catImage.src = targetGif;
+                currentGif = targetGif;
             }
-            if (snapshot.successful_feedings !== undefined && feedingsEl) {
-                feedingsEl.innerText = snapshot.successful_feedings;
-            }
-            if (snapshot.daily_goal !== undefined && goalEl) {
-                goalEl.innerText = snapshot.daily_goal;
-            }
-        };
 
-        socket.onclose = function(e) {
-            document.getElementById('ws_status').innerText = "Disconnected / Pipeline Offline";
-            document.getElementById('ws_status').style.color = "red";
-        };
+            statusLabel.innerText = targetText;
+            statusLabel.style.color = targetColor;
+        }
 
-        socket.onerror = function(error) {
-            console.error(`WebSocket Error: ${error.message}`);
-        };
+        connectCatWebSocket();
     </script>
 </body>
 </html>
