@@ -12,6 +12,10 @@ class TamagotchiEngine:
         self.shift_ended = False         
         self.feeding_locked_for_current_user = False
         
+        # --- NEW LONG-TERM METRICS ---
+        self.health = 100
+        self.streak = 0
+        
         # Load any existing progress from today on boot
         self.load_state_from_disk()
 
@@ -28,16 +32,23 @@ class TamagotchiEngine:
         self.feeding_locked_for_current_user = False
 
     def get_status(self):
-        if not self.shift_ended:
-            return "ALIVE"
-        return "ALIVE" if self.successful_feedings >= self.DAILY_GOAL else "DEAD"
+        """Updates the frontend router string directly based on health and feedings."""
+        if self.health <= 0:
+            return "DEAD"
+        elif self.health <= 50:
+            return "SICK"
+        elif self.successful_feedings >= self.DAILY_GOAL:
+            return "SATISFIED"
+        return "ALIVE"
 
     def save_state_to_disk(self):
         """Dumps current progress and today's date string into a local JSON text file."""
         state_payload = {
             "date": time.strftime('%Y-%m-%d'),
             "successful_feedings": self.successful_feedings,
-            "daily_goal": self.DAILY_GOAL
+            "daily_goal": self.DAILY_GOAL,
+            "health": self.health,    # Include health
+            "streak": self.streak     # Include streak
         }
         try:
             with open(STATE_FILE, 'w') as f:
@@ -52,13 +63,18 @@ class TamagotchiEngine:
                 with open(STATE_FILE, 'r') as f:
                     state_payload = json.load(f)
                 
+                # --- LOAD PERSISTENT STATS ---
+                # These load regardless of what day it is
+                self.health = state_payload.get("health", 100)
+                self.streak = state_payload.get("streak", 0)
+                
                 # Check if the saved file matches today's calendar date
                 if state_payload.get("date") == time.strftime('%Y-%m-%d'):
                     self.successful_feedings = state_payload.get("successful_feedings", 0)
                     self.DAILY_GOAL = state_payload.get("daily_goal", self.DAILY_GOAL)
-                    print(f"💾 RECOVERY ACTIVE: Restored {self.successful_feedings} check-ins from earlier today.")
+                    print(f"💾 RECOVERY ACTIVE: Restored {self.successful_feedings} check-ins, {self.streak} streak, {self.health} HP.")
                 else:
-                    print("📆 Old state file detected from a previous shift. Starting fresh.")
+                    print(f"📆 Old state file detected from a previous shift. Starting fresh with {self.streak} streak and {self.health} HP.")
                     self.save_state_to_disk()
             except Exception as e:
                 print(f"⚠️ Error reading pet state backup: {e}")
@@ -66,7 +82,16 @@ class TamagotchiEngine:
     def end_shift_and_reset(self):
         """Logs the final day pass/fail status, then revives the cat for a new 24hr loop."""
         self.shift_ended = True
-        final_outcome = self.get_status()
+        
+        # --- NEW END OF DAY EVALUATION MATH ---
+        if self.successful_feedings >= self.DAILY_GOAL:
+            self.streak += 1
+            self.health = min(100, self.health + 25)  # Heal up to 100
+            final_outcome = "TARGET MET - HEALED"
+        else:
+            self.streak = 0
+            self.health = max(0, self.health - 34)    # Take damage, floor at 0
+            final_outcome = "TARGET FAILED - DAMAGED"
         
         # Reset engine variables for the next 24-hour cycle
         self.successful_feedings = 0
@@ -77,4 +102,4 @@ class TamagotchiEngine:
         return final_outcome
 
     def get_telemetry_string(self, HUD_badge_string):
-        return f"{HUD_badge_string} | PET: {self.get_status()} ({self.successful_feedings}/{self.DAILY_GOAL})"
+        return f"{HUD_badge_string} | PET: {self.get_status()} ({self.successful_feedings}/{self.DAILY_GOAL}) | HP: {self.health} | STREAK: {self.streak}"

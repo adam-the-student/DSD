@@ -161,6 +161,8 @@ class BadgeTrackerStateMachine:
             telemetry_data["daily_goal"] = pet.DAILY_GOAL
             telemetry_data["successful_feedings"] = pet.successful_feedings
             telemetry_data["pet_status"] = pet.get_status()
+            telemetry_data["streak"] = getattr(pet, "streak", 0)
+            telemetry_data["health"] = getattr(pet, "health", 100)
             
             if main_event_loop is not None and connected_clients:
                 broadcast_payload = dict(telemetry_data)
@@ -198,7 +200,9 @@ telemetry_data = {
     "is_entry_event": False,
     "pet_status": "UNKNOWN",
     "successful_feedings": 0,
-    "daily_goal": 5
+    "daily_goal": 5,
+    "streak": 0,
+    "health": 100
 }
 
 connected_clients = set()
@@ -279,6 +283,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 telemetry_data["daily_goal"] = pet.DAILY_GOAL
                 telemetry_data["successful_feedings"] = pet.successful_feedings
                 telemetry_data["pet_status"] = pet.get_status()
+                telemetry_data["streak"] = getattr(pet, "streak", 0)
+                telemetry_data["health"] = getattr(pet, "health", 100)
 
             await websocket.send_json(dict(telemetry_data))
             await asyncio.sleep(0.05)
@@ -550,7 +556,9 @@ def run_vision_pipeline():
                 "is_entry_event": has_active_event,
                 "pet_status": pet.get_status(),
                 "successful_feedings": pet.successful_feedings,
-                "daily_goal": pet.DAILY_GOAL
+                "daily_goal": pet.DAILY_GOAL,
+                "streak": getattr(pet, "streak", 0),
+                "health": getattr(pet, "health", 100)
             })
             
             if has_active_event:
