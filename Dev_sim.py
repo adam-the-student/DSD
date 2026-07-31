@@ -8,7 +8,6 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-# Import the exact Tamagotchi engine used by the final pipeline
 from tamagotchi import TamagotchiEngine
 
 app = FastAPI()
@@ -16,7 +15,6 @@ app = FastAPI()
 # ==========================================
 # 🌐 WEB SERVING ROUTES
 # ==========================================
-
 app.mount("/static", StaticFiles(directory="web"), name="static")
 
 @app.get("/")
@@ -35,12 +33,11 @@ pet = TamagotchiEngine(daily_goal=5)
 event_queue = queue.Queue()
 connected_clients = set()
 
-# Simulator-specific flag to override the live status if the team fails
-is_dead = False 
-
-# Ensures streak exists for the simulation
+# Setup simulator variables safely
 if not hasattr(pet, "streak"):
-    pet.streak = 3
+    pet.streak = 0
+if not hasattr(pet, "health"):
+    pet.health = 100
 
 telemetry_data = {
     "badge_status": "SCANNING...",
@@ -51,6 +48,7 @@ telemetry_data = {
     "successful_feedings": pet.successful_feedings,
     "daily_goal": pet.DAILY_GOAL,
     "streak": pet.streak, 
+    "health": pet.health,
     "fps": 60.0  
 }
 
@@ -63,24 +61,15 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.add(websocket)
     
-    await websocket.send_json({
-        "is_startup_history": True,
-        "raw_text": "--- DEV SIMULATOR HISTORY BOOT ---"
-    })
+    await websocket.send_json({"is_startup_history": True, "raw_text": "--- BOOT ---"})
     
     try:
         while True:
-            # Sync pet state continuously
-            # If the simulator flag marks the cat as dead, override the engine's status
-            global is_dead
-            if is_dead:
-                telemetry_data["pet_status"] = "DEAD"
-            else:
-                telemetry_data["pet_status"] = pet.get_status()
-                
+            telemetry_data["pet_status"] = pet.get_status()
             telemetry_data["successful_feedings"] = pet.successful_feedings
             telemetry_data["daily_goal"] = pet.DAILY_GOAL
             telemetry_data["streak"] = pet.streak
+            telemetry_data["health"] = pet.health
             
             try:
                 while not event_queue.empty():
@@ -108,29 +97,21 @@ async def reset_badge_status(delay: float):
 # ==========================================
 @app.get("/dev/add")
 async def dev_add_checkin():
-    global is_dead
-    is_dead = False # Revive the cat upon a new check-in
     pet.reset_user() 
     success = pet.register_successful_feeding()
-    print(f"🔧 DEV: Added check-in manually. Total: {pet.successful_feedings}")
-    return {"status": "success", "total": pet.successful_feedings, "registered": success}
+    return {"status": "success", "total": pet.successful_feedings}
 
 @app.get("/dev/remove")
 async def dev_remove_checkin():
     if pet.successful_feedings > 0:
         pet.successful_feedings -= 1
         pet.save_state_to_disk() 
-        print(f"🔧 DEV: Removed check-in manually. Total: {pet.successful_feedings}")
     return {"status": "success", "total": pet.successful_feedings}
 
 @app.get("/dev/simulate_person")
 async def dev_simulate_person():
-    global is_dead
-    is_dead = False # Revive the cat
-    
     pet.reset_user()
     pet.register_successful_feeding()
-    
     telemetry_data["badge_status"] = "DOS DETECTED (99%)"
     
     payload = {
@@ -142,8 +123,7 @@ async def dev_simulate_person():
     }
     event_queue.put(payload)
     asyncio.create_task(reset_badge_status(2.0))
-    print(f"🔧 DEV: Simulated POSITIVE event. Total check-ins: {pet.successful_feedings}")
-    return {"status": "event_triggered", "total": pet.successful_feedings}
+    return {"status": "event_triggered"}
 
 @app.get("/dev/simulate_negative")
 async def dev_simulate_negative():
@@ -159,29 +139,27 @@ async def dev_simulate_negative():
     }
     event_queue.put(payload)
     asyncio.create_task(reset_badge_status(5.0))
-    print(f"🔧 DEV: Simulated NEGATIVE event.")
-    return {"status": "event_triggered", "total": pet.successful_feedings}
+    return {"status": "event_triggered"}
 
 @app.get("/dev/new_day")
 async def dev_new_day():
-    """Simulates the end-of-day rollover and streak evaluation."""
-    global is_dead
+    """Simulates the end-of-day health and streak evaluation."""
     
-    # Evaluate if the daily goal was met
     if pet.successful_feedings >= pet.DAILY_GOAL:
         pet.streak += 1
-        is_dead = False
-        print(f"🔧 DEV: Day complete. Target Met! Streak: {pet.streak}")
+        # Heal up to 25 HP, max 100
+        pet.health = min(100, pet.health + 25)
+        print(f"🔧 DEV: Target Met! Streak: {pet.streak}, Health: {pet.health}")
     else:
         pet.streak = 0
-        is_dead = True
-        print(f"🔧 DEV: Day complete. Target FAILED! Cat died.")
+        # Lose 34 HP
+        pet.health = max(0, pet.health - 34)
+        print(f"🔧 DEV: Target FAILED! Health drops to: {pet.health}")
         
-    # Reset feedings for the new day
     pet.successful_feedings = 0
     pet.save_state_to_disk()
     
-    return {"status": "new_day_triggered", "streak": pet.streak, "is_dead": is_dead}
+    return {"status": "new_day_triggered", "streak": pet.streak, "health": pet.health}
 
 @app.get("/dev")
 async def get_dev_dashboard():
@@ -201,7 +179,6 @@ async def get_dev_dashboard():
     </html>
     """
     return HTMLResponse(content=html)
-
 
 if __name__ == "__main__":
     print("Starting Development Simulator Backend...")

@@ -20,7 +20,6 @@
             transition: background-color 0.3s;
         }
         
-        /* Critical Warning Flash Animation */
         @keyframes criticalFlash {
             0% { background-color: #550000; }
             100% { background-color: #121212; }
@@ -55,8 +54,8 @@
             justify-content: center;
         }
         .mascot-container img {
-            height: 45vh;
-            max-height: 450px;
+            height: 40vh;
+            max-height: 400px;
             object-fit: contain;
             border-radius: 12px;
             background-color: #121212;
@@ -64,9 +63,38 @@
             border: 2px solid #333;
             image-rendering: pixelated; 
         }
+
+        /* Health Bar UI */
+        .health-container {
+            width: 80%;
+            margin: 0 auto 2vh auto;
+        }
+        .health-bar-bg {
+            background-color: #333;
+            border: 2px solid #444;
+            border-radius: 10px;
+            height: 25px;
+            width: 100%;
+            overflow: hidden;
+        }
+        .health-bar-fill {
+            height: 100%;
+            width: 100%;
+            background-color: #00ff66;
+            transition: width 0.5s ease-in-out, background-color 0.5s ease-in-out;
+        }
+        .health-label {
+            font-size: 1.2rem;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 5px;
+            display: flex;
+            justify-content: space-between;
+        }
         
         .status-text {
-            font-size: 2.5rem;
+            font-size: 2rem;
             font-weight: bold;
             margin-bottom: 2vh;
             color: #8d8d99;
@@ -74,12 +102,11 @@
             letter-spacing: 2px;
         }
         
-        /* Updated Stats Grid for 3 Columns */
         .stats-grid {
             display: flex;
             justify-content: space-evenly;
             background-color: #2a2a2a;
-            padding: 3vh 1vw;
+            padding: 2vh 1vw;
             border-radius: 12px;
             border: 1px solid #444;
         }
@@ -90,14 +117,14 @@
             width: 30%;
         }
         .stat-label {
-            font-size: 1.2rem;
+            font-size: 1rem;
             color: #aaa;
             text-transform: uppercase;
             letter-spacing: 2px;
             margin-bottom: 10px;
         }
         .stat-value {
-            font-size: 5rem;
+            font-size: 4rem;
             font-weight: bold;
             color: #fff;
             line-height: 1;
@@ -118,10 +145,21 @@
         <div class="mascot-container">
             <img id="retro-cat-mascot" src="/static/GIFS/nukoMagnifyingGlass.gif" alt="Cat Mascot">
         </div>
+
+        <!-- Health Bar -->
+        <div class="health-container">
+            <div class="health-label">
+                <span>Health</span>
+                <span id="health_text">100%</span>
+            </div>
+            <div class="health-bar-bg">
+                <div class="health-bar-fill" id="health_fill"></div>
+            </div>
+        </div>
         
         <div id="vitals-mood-text" class="status-text">SYSTEM LINK: CALIBRATING...</div>
 
-        <!-- Check-ins, Streak, and Baseline Dashboard -->
+        <!-- Dashboard Stats -->
         <div class="stats-grid">
             <div class="stat-box">
                 <span class="stat-label">Check-ins</span>
@@ -143,6 +181,7 @@
     <script>
         let catSocket;
         let currentGif = ""; 
+        let currentHealth = 100;
 
         function connectCatWebSocket() {
             catSocket = new WebSocket(`ws://${window.location.host}/ws`);
@@ -155,7 +194,6 @@
 
             catSocket.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                
                 if (data.is_startup_history) return;
 
                 if (data.successful_feedings !== undefined) {
@@ -166,6 +204,23 @@
                 }
                 if (data.streak !== undefined) {
                     document.getElementById('streak_count').innerText = data.streak;
+                }
+                
+                // Update Health Bar logic
+                if (data.health !== undefined) {
+                    currentHealth = data.health;
+                    document.getElementById('health_text').innerText = `${currentHealth}%`;
+                    
+                    const healthFill = document.getElementById('health_fill');
+                    healthFill.style.width = `${currentHealth}%`;
+                    
+                    if (currentHealth > 60) {
+                        healthFill.style.backgroundColor = "#00ff66"; // Green
+                    } else if (currentHealth > 0) {
+                        healthFill.style.backgroundColor = "#ffaa00"; // Orange
+                    } else {
+                        healthFill.style.backgroundColor = "#ff5555"; // Red
+                    }
                 }
 
                 updateCatAnimation(data.badge_status, data.pet_status);
@@ -179,6 +234,7 @@
                 document.getElementById('vitals-mood-text').innerText = "SYSTEM LINK: OFFLINE";
                 document.getElementById('vitals-mood-text').style.color = "#ff5555";
                 
+                // Connection loss handling
                 setTimeout(connectCatWebSocket, 2000); 
             };
         }
@@ -195,19 +251,14 @@
             let targetText = "";
             let targetColor = "";
 
-            if (normalizedStatus.includes("INITIALIZING") || normalizedStatus.includes("SCANNING")) {
-                targetGif = "/static/GIFS/nukoMagnifyingGlass.gif";
-                targetText = "SCANNING AREA...";
-                targetColor = "#8d8d99";
-            } 
-            else if (normalizedStatus.includes("NO BADGE") || normalizedStatus.includes("ALERT")) {
+            // HIERARCHY 1: Immediate Active Events (Highest Priority)
+            if (normalizedStatus.includes("NO BADGE") || normalizedStatus.includes("ALERT")) {
                 targetGif = "/static/GIFS/nukoWorriedQuestion.gif";
                 targetText = "WARNING: NO BADGE";
                 targetColor = "#ff5555";
                 
-                // Trigger the screen flash by resetting the animation class
                 document.body.classList.remove('flash-active');
-                void document.body.offsetWidth; // Force a DOM reflow
+                void document.body.offsetWidth; 
                 document.body.classList.add('flash-active');
             } 
             else if (normalizedStatus.includes("BADGE DETECTED") || normalizedStatus.includes("DOS DETECTED")) {
@@ -215,16 +266,29 @@
                 targetText = "CHECK-IN CONFIRMED!";
                 targetColor = "#00ff66";
             } 
-            else if (normalizedPet === "DEAD" || normalizedPet === "SICK") {
-                targetGif = "/static/GIFS/nukoEmbarrassedDrop.gif";
-                targetText = "CRITICAL HEALTH";
+            // HIERARCHY 2: Health States
+            else if (currentHealth <= 0) {
+                targetGif = "/static/GIFS/nukoEmbarrassedDrop.gif"; 
+                targetText = "SYSTEM FAILURE";
                 targetColor = "#ff5555";
-            } 
+            }
+            else if (currentHealth <= 50) {
+                targetGif = "/static/GIFS/nukoEmbarrassedDrop.gif"; 
+                targetText = "CRITICAL HEALTH";
+                targetColor = "#ffaa00";
+            }
+            // HIERARCHY 3: Daily Target Reached
             else if (normalizedPet === "SATISFIED" || normalizedPet === "FULL") {
                 targetGif = "/static/GIFS/nukoCatHeart.gif";
                 targetText = "DAILY TARGET REACHED";
                 targetColor = "#00ff66";
             } 
+            // HIERARCHY 4: Default Active/Scanning States
+            else if (normalizedStatus.includes("INITIALIZING") || normalizedStatus.includes("SCANNING")) {
+                targetGif = "/static/GIFS/nukoMagnifyingGlass.gif";
+                targetText = "SCANNING AREA...";
+                targetColor = "#8d8d99";
+            }
             else {
                 targetGif = "/static/GIFS/nukoCatSniff.gif";
                 targetText = "SYSTEM ACTIVE";
