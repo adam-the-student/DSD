@@ -109,6 +109,9 @@ class BadgeTrackerStateMachine:
                 print(f"🔄 compliance status upgraded live: Shifted to {decision} at {confidence}%.")
                 self.current_user_max_confidence = confidence
                 self.current_user_final_decision = decision
+                
+                # FIX 1: Missing tamagotchi feeding trigger added here
+                pet_engine_reference.register_successful_feeding()
             
             # Standard initial locking behavior for a fresh tracking session
             elif self.state != "LOCKED":
@@ -310,6 +313,10 @@ def run_vision_pipeline():
     current_cycle_day = time.strftime('%Y-%m-%d')
     telemetry_data["daily_goal"] = pet.DAILY_GOAL
 
+    # FIX 2: Throttling variables for CPU classifier when LOCKED
+    last_classifier_time = 0.0
+    CLASSIFIER_LOCKED_COOLDOWN = 0.5 
+
     # --- STAGE 1: NATIVE NPU SETUP ---
     model_path = "models/yolov8s-pose-h10.hef"
     print(f"Loading hardware network: {model_path} onto AI HAT+...")
@@ -501,7 +508,13 @@ def run_vision_pipeline():
             # =====================================================================
             # 🔍 STAGE 2 CLASSIFIER & VALIDATION PERIODIC HARVEST LAYER
             # =====================================================================
-            if tracker.state != "LOCKED" and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
+            
+            # Determine if CPU classifier should run this loop
+            can_run_classifier = (tracker.state != "LOCKED") or (current_time - last_classifier_time >= CLASSIFIER_LOCKED_COOLDOWN)
+
+            if can_run_classifier and distance_status == "OK" and cropped_chest_frame is not None and cropped_chest_frame.size > 0:
+                last_classifier_time = current_time
+                
                 resized_crop = cv2.resize(cropped_chest_frame, CLASSIFIER_IMG_SIZE)
                 classifier_results = stage2_classifier(resized_crop, verbose=False, imgsz=224)
                 
@@ -537,6 +550,10 @@ def run_vision_pipeline():
                 
                 if local_badge_status != "CALCULATING...":
                     tracker.update_evaluation(local_badge_status, top_confidence, estimated_ft, pet)
+
+            # Ensure local_badge_status reflects the finalized locked state if one exists
+            if tracker.state == "LOCKED":
+                local_badge_status = tracker.current_user_final_decision
 
             has_active_event = telemetry_data.get("is_entry_event", False)
             evt_time = telemetry_data.get("time", None)
